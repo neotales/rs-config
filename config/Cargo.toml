@@ -10,6 +10,10 @@ authors = ["x0craft"]
 readme = "README.md"
 keywords = ["config", "configuration", "settings", "precedence", "merge"]
 categories = ["config"]
+# Benchmarks and the fixtures they generate are development tooling, not part
+# of the published crate. Excluding the directory removes the benchmark sources
+# from the `.crate`; Cargo drops the `[[bench]]` target whose source is missing.
+exclude = ["/benches"]
 
 [features]
 # The core stays memory-only. Every provider is opt-in, so a build that reads
@@ -42,8 +46,20 @@ saphyr = { version = "0.0.12", default-features = false, optional = true }
 saphyr-parser = { version = "0.0.12", default-features = false, optional = true }
 
 [dev-dependencies]
+# The benchmark harness. Default features are off so the dev tree does not pull
+# in the plotting stack or rayon; the suite prints its statistics and needs no
+# gnuplot.
+criterion = { version = "0.8", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
+# A generic value target for the parser-only JSON/JSON5 baselines. This is a
+# dev-dependency only: the library's own `json` feature still owns `serde_json`
+# as an optional runtime dependency.
+serde_json = "1.0"
 tempfile = "3"
+
+[[bench]]
+name = "sources"
+harness = false
 
 [[example]]
 name = "reload"

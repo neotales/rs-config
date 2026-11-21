@@ -10,6 +10,10 @@ authors = ["x0craft"]
 readme = "README.md"
 keywords = ["config", "configuration", "keepass", "kdbx", "secrets"]
 categories = ["config"]
+# Benchmarks and their generated vaults are development tooling, not part of
+# the published crate. Excluding the directory keeps the KDBX fixtures and the
+# Criterion-only code out of the `.crate`.
+exclude = ["/benches"]
 
 [features]
 # The provider itself has no optional behavior. `reload` only forwards the
@@ -29,7 +33,14 @@ neotales-config = { version = "0.0.0-alpha.0", path = "../config", default-featu
 neotales-keepass = "0.0.0-alpha.1"
 
 [dev-dependencies]
+# The benchmark harness; see the core crate's manifest for why the default
+# features (plots, rayon) are off.
+criterion = { version = "0.8", default-features = false }
 tempfile = "3"
+
+[[bench]]
+name = "keepass"
+harness = false
 
 [lints]
 workspace = true

@@ -46,8 +46,9 @@ Each provider is opt-in and is a normal `Source`:
 | `ini` | `IniFile` | none |
 
 No provider is compiled into the default build. Every parser and the dotenv expander are optional
-dependencies of exactly one feature; `cargo tree --no-default-features` shows no parser and no
-expander.
+dependencies of exactly one feature; `cargo tree --no-default-features -e normal` shows no parser
+and no expander. The benchmark's generic-value dev-dependency and Criterion are not part of the
+library graph and never appear in a downstream build.
 
 ### Key mapping
 
