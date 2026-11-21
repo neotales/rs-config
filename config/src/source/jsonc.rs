@@ -197,6 +197,7 @@ mod tests {
             r#"{"a": Infinity}"#,
             r#"{"a": NaN}"#,
             r#"{"a": "\x41"}"#,
+            "{\"a\": \"line\\\nbreak\"}",
             r#"{"a": 1} {"b": 2}"#,
         ] {
             assert!(parse(document).is_err(), "{document}");

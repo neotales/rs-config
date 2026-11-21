@@ -340,6 +340,11 @@ mod tests {
             "a: !custom 1\n",
             "1: one\n",
             "? [a, b]\n: value\n",
+            "a: &anchor\n  b: 1\n",
+            "a: &anchor [1, 2]\n",
+            "a: !custom\n  b: 1\n",
+            "a: !!str 1\n",
+            "base: &base { a: 1 }\nchild: { <<: *base }\n",
         ] {
             let error = parse(document).unwrap_err();
             assert_eq!(error.kind(), SourceErrorKind::Invalid, "{document}");
@@ -348,7 +353,12 @@ mod tests {
 
     #[test]
     fn rejects_duplicates_and_multiple_documents() {
-        for document in ["a: 1\na: 2\n", "a: 1\n---\nb: 2\n", ""] {
+        for document in [
+            "a: 1\na: 2\n",
+            "outer:\n  a: 1\n  a: 2\n",
+            "a: 1\n---\nb: 2\n",
+            "",
+        ] {
             assert!(parse(document).is_err(), "{document}");
         }
     }

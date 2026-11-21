@@ -241,6 +241,18 @@ mod tests {
     }
 
     #[test]
+    fn values_are_not_interpolated_and_keep_later_equals_signs() {
+        let document = map(
+            "home = ${HOME}\nappdata = %APPDATA%\nshell = $(pwd)\nquery = a=b=c\nkey = 1\nkey = 2\n",
+        );
+        assert_eq!(document["home"], Value::from("${HOME}"));
+        assert_eq!(document["appdata"], Value::from("%APPDATA%"));
+        assert_eq!(document["shell"], Value::from("$(pwd)"));
+        assert_eq!(document["query"], Value::from("a=b=c"));
+        assert_eq!(document["key"], Value::from("2"));
+    }
+
+    #[test]
     fn bad_lines_empty_names_and_conflicts_are_invalid() {
         for text in [
             "this is not an assignment\n",
