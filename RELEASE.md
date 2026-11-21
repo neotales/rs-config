@@ -19,11 +19,13 @@ exhaustive. Either mistake spends an immutable version, so neither is automated.
 What remains is the part that can be proven locally: the group packages
 together, in dependency order, and `gate` writes one machine-readable record of
 the commit, the clean flag, and each verified artifact's SHA-256 and manifest
-digest. `preflight` consumes exactly that record, refuses a stale commit, a
-changed manifest, a missing artifact or an artifact whose bytes no longer match
-before it asks crates.io anything, and then reports the registry state of those
-recorded digests. `system-admin` publishes; the published artifact is downloaded
-and compared with the recorded digest.
+digest. It also prints the SHA-256 of that record and can write it to a separate
+path. `preflight` requires that digest as a separate input and checks the record
+bytes against it before it parses the record, refuses a stale commit, a changed
+manifest, a missing artifact or an artifact whose bytes no longer match, and only
+then asks crates.io anything and reports the registry state of those recorded
+digests. `system-admin` publishes; the published artifact is downloaded and
+compared with the recorded digest.
 
 That comparison happens after the upload. It proves what crates.io serves hashes
 to the verified digest; it does not prove that `cargo publish` sent those exact
@@ -35,9 +37,9 @@ bytes, because it repackages the checkout. Nothing here claims that guarantee.
 
 | Job | What it does |
 | --- | --- |
-| `check` | Format, clippy, tests, a `cargo publish --dry-run` packaging smoke test, and (on `workflow_dispatch` only) the gate and preflight, with the gate record passed from one to the other. |
+| `check` | Format, clippy, tests, a `cargo publish --dry-run` packaging smoke test, and (on `workflow_dispatch` only) the gate and preflight, with the gate record's digest passed from the gate step to the preflight step. |
 | `version` | Requires the tag to equal `v` plus the version in every member manifest. |
-| `verify` | Runs the gate, which writes the record of each artifact's SHA-256 and manifest digest; preflight consumes exactly that record and rejects a stale commit, changed manifest, missing artifact or changed bytes before any plan; then it asks crates.io (read-only) about the recorded digests, proves the tree is the tag and unmodified, and states that nothing was published. |
+| `verify` | Runs the gate, which writes the record of each artifact's SHA-256 and manifest digest and prints the record's own SHA-256; the step captures that digest as its output. Preflight receives it separately, checks the record bytes against it before parsing, then rejects a stale commit, changed manifest, missing artifact or changed bytes before any plan; it asks crates.io (read-only) about the recorded digests, proves the tree is the tag and unmodified, and states that nothing was published. |
 
 The `verify` job has `permissions: contents: read`. It does not request
 `id-token`, and there is no `CARGO_REGISTRY_TOKEN` secret in this repository.
@@ -45,7 +47,8 @@ A green run means **the tag is verified, not released**. The job summary carries
 the recorded digests and the manual plan.
 
 A `workflow_dispatch` run never reaches `verify`; it runs the checks, the gate
-and preflight, with the record passed between them, and publishes nothing.
+and preflight, with the record's digest passed between the steps as a step
+output, and publishes nothing.
 
 `preflight` does not run `cargo package` and does not repackage the tree. It
 reports on the artifacts the gate built and recorded; it does not produce a
@@ -68,9 +71,12 @@ Bump the version, commit, push, then tag that commit:
 
 ```sh
 python3 eng/release/stage_gate.py gate \
-  --record target/package/gate-record.json
+  --record target/package/gate-record.json \
+  --record-sha256-out target/package/gate-record.sha256
+RECORD_SHA256=<paste the digest the gate printed>
 python3 eng/release/stage_gate.py preflight \
   --record target/package/gate-record.json \
+  --expected-record-sha256 "$RECORD_SHA256" \
   --artifact-dir target/package
 git tag v0.3.1
 git push origin dev
@@ -106,10 +112,11 @@ would be unpublishable at that version and the tag would be spent.
    `target/package/gate-record.json`): the commit, whether that checkout was
    clean, and for every member the artifact filename, its SHA-256, the manifest
    path, and the manifest's SHA-256. The record is written atomically, so a
-   half-written record is never mistaken for a capture. Keep the record under the
-   ignored `target/` directory or outside the checkout: preflight refuses a
-   working tree with untracked changes, and an untracked record inside the tree
-   counts as one.
+   half-written record is never mistaken for a capture. It also prints the
+   record's own SHA-256 and, with `--record-sha256-out`, writes that digest to a
+   separate path. Keep the record under the ignored `target/` directory or
+   outside the checkout: preflight refuses a working tree with untracked
+   changes, and an untracked record inside the tree counts as one.
 
 After staging, the verification is offline. `crates.io` is replaced by the
 staging directory, so resolution cannot reach the network and a verification
@@ -122,12 +129,14 @@ What the gate proves: every member packages, every member builds from the exact
 describes that commit, that clean checkout and those bytes. `cargo package`
 stamps the commit and dirty flag into `.cargo_vcs_info.json` inside each
 `.crate`; the gate refuses an artifact whose stamp is not the commit it is about
-to record, so the record's commit is bound to the bytes as well as to the
-checkout. What it does not prove: that crates.io will accept the upload, that
-the bytes `cargo publish` repackages later are identical, or that a published
-artifact matches. The first is why `system-admin` publishes; the last two are why
-the recorded digest is compared with the artifact downloaded from crates.io
-afterwards.
+to record, and it refuses any artifact whose stamp says `dirty`. A clean tree at
+record time does not clean a package: reverting or committing changes after
+`cargo package` leaves those bytes stamped `dirty`, so the gate refuses them
+rather than record a dirty build. What it does not prove: that crates.io will
+accept the upload, that the bytes `cargo publish` repackages later are identical,
+or that a published artifact matches. The first is why `system-admin` publishes;
+the last two are why the recorded digest is compared with the artifact
+downloaded from crates.io afterwards.
 
 ### The gate artifact is not the upload artifact
 
@@ -138,9 +147,31 @@ the record, and that same digest is what you check against the file crates.io
 serves after a manual upload. This is a comparison after the fact, not a check
 that bound the bytes that were sent, and the documentation says so plainly.
 
+### The record digest is a handoff, not tamper-proofing
+
+A record and its artifacts live in the same filesystem, so a record that agrees
+with an artifact beside it proves only that the two agree. `gate` therefore
+prints the SHA-256 of the record it wrote and can write that digest with
+`--record-sha256-out`. `preflight` requires the digest as
+`--expected-record-sha256` and hashes the record bytes before it parses them. In
+CI the gate step writes the digest to a separate path and immediately captures
+it as a step output; the preflight step receives that output through the
+workflow's step context, not by reading a file the record and artifacts can be
+rewritten with. A record and artifacts replaced together then hash to a
+different record and are refused, before the JSON is read and before crates.io
+is queried. The self-test exercises exactly that pair mutation.
+
+This is a separation of inputs, not tamper-proofing. It only holds if the
+expected digest really came from somewhere the workspace cannot also change: a
+CI step output from the gate step, or the operator's own notes. If an attacker
+can rewrite the record, the artifacts **and** the value passed to
+`--expected-record-sha256`, the anchor is defeated. The digest binds the record
+to the gate run; it does not make the filesystem trustworthy.
+
 `preflight` consumes the record rather than re-deriving it. Before it asks
 crates.io anything or prints a plan, it checks:
 
+- the record's bytes hash to the digest captured when the gate wrote it;
 - the record's commit equals `HEAD`;
 - the record was written from a clean checkout, and the checkout is still clean;
 - each member's manifest is the one the record names, at the recorded version and
@@ -175,11 +206,12 @@ re-checked at the end too: a file that moved while the registry was queried is
 not silently reported as verified.
 
 A record failure happens before any registry query and before any plan. The
-messages name what moved: `the gate record is stale`, `the checkout has changed
-since the gate ran`, `manifest changed after the gate verified it`,
-`artifact changed after the gate verified it`, or `is missing`. Re-run the gate
-from a clean checkout of the tag; do not publish bytes whose digest was not
-recorded by that gate run.
+messages name what moved: the record does not hash to the captured digest, `the
+gate record is stale`, `the checkout has changed since the gate ran`, `manifest
+changed after the gate verified it`, `artifact changed after the gate verified
+it`, or `is missing`. Re-run the gate from a clean checkout of the tag; do not
+publish bytes whose digest was not recorded by that gate run. A package stamped
+`dirty=true` fails at the gate, so it never reaches a record at all.
 
 ## Publishing by hand
 
@@ -203,16 +235,23 @@ git describe --tags --exact-match HEAD   # must print the tag
 
    ```sh
    python3 eng/release/stage_gate.py gate \
-     --record target/package/gate-record.json
+     --record target/package/gate-record.json \
+     --record-sha256-out target/package/gate-record.sha256
+   # Write the digest below into your notes. It must not be re-read from the
+   # workspace later, because that is where the record and artifacts can move.
+   cat target/package/gate-record.sha256
+   RECORD_SHA256=<paste the digest the gate printed>
    python3 eng/release/stage_gate.py preflight \
      --record target/package/gate-record.json \
+     --expected-record-sha256 "$RECORD_SHA256" \
      --artifact-dir target/package
    ```
 
-   `preflight` must exit zero. Write down the two `sha256` lines, or hand the
-   record to `system-admin`. If it exits non-zero because of `different`,
-   `yanked`, an inconsistent group, a stale commit or a changed document, stop:
-   the version cannot be published as verified.
+   `preflight` must exit zero. Write down the two artifact `sha256` lines and
+   the record digest, or hand the record to `system-admin`. If it exits non-zero
+   because of `different`, `yanked`, an inconsistent group, a stale commit, a
+   changed document or a record digest mismatch, stop: the version cannot be
+   published as verified.
 
 2. Hand the **core** upload to `system-admin`. The core goes first:
 
@@ -272,12 +311,15 @@ git describe --tags --exact-match HEAD   # must print the tag
    ```sh
    python3 eng/release/stage_gate.py preflight \
      --record target/package/gate-record.json \
+     --expected-record-sha256 "$RECORD_SHA256" \
      --artifact-dir target/package
    ```
 
    `preflight` reads the recorded artifacts and does not repackage, so it does
    not compare a fresh build with the registry. Both members must report
-   `identical` and the plan must say `nothing to publish`.
+   `identical` and the plan must say `nothing to publish`. Use the same record
+   digest you captured in step 1; re-reading it from the workspace would defeat
+   the check.
 
 The download comparison happens after the upload. It proves that the bytes
 crates.io serves hash to the recorded digest; it does not prove that the bytes
@@ -308,17 +350,21 @@ repository never holds its token.
 
    ```sh
    python3 eng/release/stage_gate.py gate \
-     --record target/package/gate-record.json
+     --record target/package/gate-record.json \
+     --record-sha256-out target/package/gate-record.sha256
+   RECORD_SHA256=<paste the digest the gate printed>
    python3 eng/release/stage_gate.py preflight \
      --record target/package/gate-record.json \
+     --expected-record-sha256 "$RECORD_SHA256" \
      --artifact-dir target/package
    ```
 
    The gate stages the candidate core locally and verifies the provider against
    it, and uploads nothing. `preflight` consumes that record and requires both
    versions to be absent (or already present at the recorded digest). A version
-   spent at other bytes, a matching-but-yanked version, a stale commit or a
-   changed artifact stops here. Hand the record to `system-admin`. Skipping this
+   spent at other bytes, a matching-but-yanked version, a stale commit, a changed
+   artifact or a record that no longer hashes to the digest the gate printed
+   stops here. Hand the record and its digest to `system-admin`. Skipping this
    check risks discovering that the provider cannot be packaged only after the
    core is already published, which is the state this repository's gate exists
    to avoid.
@@ -373,13 +419,16 @@ part of a crate.
    with it. The lockfile is what the scheduled audit checks.
 2. Push the commit.
 3. Tag it `vX.Y.Z` and push the tag.
-4. The workflow runs the checks and the gate; the gate writes the record;
-   preflight consumes exactly that record, refuses a stale commit or a changed
-   manifest/artifact, reports the registry state and stops. Nothing is published.
-5. Hand the record to `system-admin`, who uploads from a clean checkout of the
-   tag in dependency order. After the **core** upload, download it and compare
-   its digest with the record **before** the provider is uploaded; stop on a
-   mismatch. Then upload the provider and compare it the same way.
+4. The workflow runs the checks and the gate; the gate writes the record and
+   prints its SHA-256, which the job captures as a step output; preflight
+   receives that digest separately, refuses a stale commit, a changed manifest,
+   artifact or record, reports the registry state and stops. Nothing is
+   published.
+5. Hand the record and its digest to `system-admin`, who uploads from a clean
+   checkout of the tag in dependency order. After the **core** upload, download
+   it and compare its digest with the record **before** the provider is
+   uploaded; stop on a mismatch. Then upload the provider and compare it the
+   same way.
 
 ## When the core published and the provider did not
 
@@ -394,9 +443,14 @@ record from a clean checkout of that tag, produce one before asking:
 
 ```sh
 python3 eng/release/stage_gate.py gate \
-  --record target/package/gate-record.json
+  --record target/package/gate-record.json \
+  --record-sha256-out target/package/gate-record.sha256
+# Capture this digest somewhere the record and artifacts cannot be rewritten.
+# In CI it is the gate step's output; locally, write it into your notes.
+RECORD_SHA256=<paste the digest the gate printed>
 python3 eng/release/stage_gate.py preflight \
   --record target/package/gate-record.json \
+  --expected-record-sha256 "$RECORD_SHA256" \
   --artifact-dir target/package
 ```
 
@@ -430,6 +484,11 @@ before it prints this table; re-run the gate from the clean tag checkout.
 - No re-hashing a changed artifact and treating the new hash as the reference.
   A modified, missing or unreviewed artifact fails preflight. The gate record is
   the only authority for the digest.
+- No re-reading the record digest from the workspace at preflight time. It must
+  come from the gate step's output or the operator's notes; reading the `.sha256`
+  file beside the record would let a rewritten record choose its own reference.
+- No recording a package stamped `dirty=true`. A clean tree at record time does
+  not clean the bytes `cargo package` produced; the gate refuses them.
 - No claim that a manual upload matched without comparing the artifact
   downloaded from crates.io with the recorded digest. A version string alone
   cannot tell a completed release from a different tarball, and the comparison is
@@ -473,8 +532,10 @@ stages the core it needs.
 | Gate: `cannot read https://index.crates.io/...` | The index was unreachable while staging the locked dependencies. Nothing was published; re-run the job. |
 | Gate: `... is a symbolic link` | `CARGO_TARGET_DIR` or `target/` traverses a symlink. The gate refuses to create or delete through it. Point the target at a real directory. Nothing was published. |
 | Gate: `was packaged from commit ..., but ... is at ...` | HEAD moved while the gate was packaging, or the artifact came from another commit. Nothing was published; re-run the gate on a commit that is not moving. |
+| Gate: `was packaged from a dirty tree` | `cargo package` stamped `dirty=true` into the `.crate`. Committing or reverting the changes afterwards does not change those bytes, so the gate refuses to record them. Commit or discard the changes, then run the gate again. |
 | Gate: `has no .../.cargo_vcs_info.json` | `cargo package` did not stamp the commit, usually because the run is not in a Git checkout. The record cannot bind the bytes to a commit; run the gate from the real release checkout. |
 | Verify: `the checkout has changes` or `HEAD is ... not ...` | The tag job is not running on a clean checkout of that exact tag. The recorded digests would describe something else. Nothing was published; investigate the checkout, not the release. |
+| Preflight: `... hashes to ..., not the digest ... captured when the gate wrote it` | The record changed after the gate wrote it, or the wrong digest was supplied. Preflight refuses before parsing the record. Nothing was published; re-run the gate and pass the digest that run's gate step printed (CI: `steps.gate.outputs.record_sha256`; locally: your notes). |
 | Preflight: `different` | crates.io already holds this version at other bytes. It exits non-zero. A version cannot be replaced: bump the patch version and tag again. Do not retry the tag. |
 | Preflight: `yanked` | crates.io holds this exact artifact but the version is yanked. It exits non-zero. Unyank it on crates.io if that was our yank; otherwise bump the version. A yanked version cannot be published again. |
 | Preflight: provider exists while the core does not | The registry state is inconsistent with a group release. Nothing was published. Do not publish around it; investigate the versions and bump the group version. |

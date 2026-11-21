@@ -43,14 +43,18 @@ prove that the bytes this program verified are the bytes crates.io received:
 What `gate` and `preflight` therefore do is produce evidence and report, never
 send. `gate` writes one machine-readable record: the commit it ran on, whether
 that checkout was clean, and for every member the artifact filename, the
-manifest digest, and the SHA-256 of the verified `.crate` bytes. `preflight`
-consumes exactly that record. It reads the recorded commit, the manifests and
-the artifacts, rejects a stale commit, a changed manifest, a missing artifact,
-or an artifact whose bytes differ from the record, and only then asks crates.io
-about the recorded digests and prints the manual plan. It never re-hashes an
-artifact and presents the new hash as the reference: a mismatch is a failure,
-not a new capture. `preflight` does not run `cargo package`; the artifacts it
-reports on are the ones the gate built.
+manifest digest, and the SHA-256 of the verified `.crate` bytes. It also prints
+the SHA-256 of the record itself, and can write that digest to a separate path
+for an out-of-band handoff. `preflight` requires that digest and checks the
+record bytes against it before parsing. It then reads the recorded commit, the
+manifests and the artifacts, rejects a stale commit, a changed manifest, a
+missing artifact, or an artifact whose bytes differ from the record, and only
+then asks crates.io about the recorded digests and prints the manual plan. It
+never re-hashes an artifact and presents the new hash as the reference: a
+mismatch is a failure, not a new capture. The digest anchor binds the record to
+the gate run only when the expected value comes from outside the workspace that
+holds the record and artifacts; it is not tamper-proofing. `preflight` does not
+run `cargo package`; the artifacts it reports on are the ones the gate built.
 
 The comparison remains an after-the-fact one. It does not prove that the bytes
 `cargo publish` sends are the bytes the gate verified, and nothing here claims
@@ -58,18 +62,22 @@ that guarantee.
 
 Usage
 -----
-    stage_gate.py gate [--root DIR] [--record PATH] [--self-test] [--keep-work]
+    stage_gate.py gate [--root DIR] [--record PATH] [--record-sha256-out PATH]
+                       [--self-test] [--keep-work]
 
         Package and verify every member in dependency order. Leaves the
         release artifacts in target/package/ and writes the captured digests
         to `--record`, by default `target/package/gate-record.json`. The record
         is written atomically and is the only input `preflight` treats as
-        authoritative. `--self-test` additionally injects the failures this gate
-        exists to catch, checks the verdicts of `state`, proves both packages are
-        byte-stable, mutates an artifact between the gate record and preflight
-        and requires preflight to refuse it, proves there is no publishing path,
-        and runs the gate from outside the repository root. Nothing is published
-        and no registry token is read.
+        authoritative. Prints the SHA-256 of the record it just wrote and, with
+        `--record-sha256-out`, writes that digest to a path the caller can hand
+        to `preflight` out of band. `--self-test` additionally injects the
+        failures this gate exists to catch, checks the verdicts of `state`,
+        proves both packages are byte-stable, mutates an artifact and the record
+        together and requires preflight to refuse them against the captured
+        digest, proves there is no publishing path, and runs the gate from
+        outside the repository root. Nothing is published and no registry token
+        is read.
 
     stage_gate.py state --manifest PATH --artifact-dir DIR [--index-base URL]
 
@@ -79,15 +87,18 @@ Usage
         version is yanked, which still blocks a release. Use this to check a
         downloaded copy of a manual publish against the recorded digest.
 
-    stage_gate.py preflight --record PATH --artifact-dir DIR [--root DIR]
-                            [--index-base URL]
+    stage_gate.py preflight --record PATH --expected-record-sha256 HEX
+                            --artifact-dir DIR [--root DIR] [--index-base URL]
 
-        Consume the gate record. Reject a stale commit, a changed manifest, a
-        missing artifact or an artifact that no longer hashes to the recorded
-        digest before doing anything else. Then query crates.io with the
-        recorded digests and print the manual plan. It does not repackage and
-        does not re-hash an artifact into a new reference. Exit non-zero when a
-        member is published at different bytes, is yanked, the group state is
+        Consume the gate record. The record bytes must hash to the digest
+        supplied out of band by the gate run before this one; that digest is
+        verified before the record is parsed, so a record and artifacts mutated
+        together are still refused. Then reject a stale commit, a changed
+        manifest, a missing artifact or an artifact that no longer hashes to the
+        recorded digest. Then query crates.io with the recorded digests and
+        print the manual plan. It does not repackage and does not re-hash an
+        artifact into a new reference. Exit non-zero when a member is published
+        at different bytes, is yanked, the group state is
         inconsistent, or the record no longer describes this checkout. Exit zero
         when the remaining work is a manual publish.
 """
@@ -96,6 +107,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import shlex
@@ -254,6 +266,17 @@ def main(argv: list[str]) -> int:
         help="inject the failures the gate exists to catch and check they fail",
     )
     gate.add_argument(
+        "--record-sha256-out",
+        type=Path,
+        default=None,
+        help=(
+            "write only the SHA-256 of the record to this path. The digest is "
+            "computed from the exact bytes just written. Hand it to preflight "
+            "out of band (a CI step output or the operator's notes), never from "
+            "a file the record and artifacts can be changed with."
+        ),
+    )
+    gate.add_argument(
         "--keep-work",
         action="store_true",
         help="keep the unique staging directory for diagnosis",
@@ -292,6 +315,16 @@ def main(argv: list[str]) -> int:
         help="gate record to consume; its digests are the only reference",
     )
     preflight.add_argument(
+        "--expected-record-sha256",
+        required=True,
+        help=(
+            "SHA-256 the gate printed for this record when it wrote it, "
+            "captured out of band (a CI step output or the operator's notes). "
+            "The record bytes are checked against it before the record is "
+            "parsed or the registry is queried."
+        ),
+    )
+    preflight.add_argument(
         "--artifact-dir",
         type=Path,
         required=True,
@@ -318,6 +351,11 @@ def main(argv: list[str]) -> int:
                 root,
                 index_base,
                 record=record,
+                record_sha256_out=(
+                    None
+                    if arguments.record_sha256_out is None
+                    else resolve_from(root, arguments.record_sha256_out)
+                ),
                 self_test=arguments.self_test,
                 keep_work=arguments.keep_work,
             )
@@ -336,6 +374,7 @@ def main(argv: list[str]) -> int:
                 resolve_from(root, arguments.record),
                 resolve_from(root, arguments.artifact_dir),
                 index_base,
+                expected_record_sha256=arguments.expected_record_sha256,
             )
     except GateError as error:
         print(f"error: {error}", file=sys.stderr)
@@ -364,6 +403,7 @@ def gate_release(
     index_base: str,
     *,
     record: Path,
+    record_sha256_out: Path | None,
     self_test: bool,
     keep_work: bool,
 ) -> None:
@@ -428,20 +468,7 @@ def gate_release(
                     "checkout built cannot be inspected"
                 )
             digest = sha256(artifact)
-            packaged_commit, packaged_dirty = artifact_provenance(
-                artifact, name, version
-            )
-            if packaged_commit != commit:
-                raise GateError(
-                    f"{artifact.name} was packaged from commit {packaged_commit}, "
-                    f"but {root} is at {commit}. The artifact and the record would "
-                    "name different commits; refusing to write it."
-                )
-            if packaged_dirty:
-                print(
-                    f"   warning: {artifact.name} was packaged from a dirty tree",
-                    file=sys.stderr,
-                )
+            verify_artifact_provenance(artifact, name, version, commit)
             stage_artifact(
                 registry,
                 registry / "index",
@@ -460,13 +487,17 @@ def gate_release(
         )
 
         value = build_record(root, artifacts, commit=commit)
-        write_record(record, value)
+        record_digest = write_record(record, value)
         if read_record(record) != value:
             raise GateError(
                 f"{record} did not read back as the captures the gate just "
                 "verified; refusing to leave a record preflight could misread"
             )
         print(f"captured digests for {len(value.members)} members in {record}")
+        print(f"record sha256: {record_digest}")
+        if record_sha256_out is not None:
+            write_record_digest(record_sha256_out, record_digest)
+            print(f"record sha256 written to {record_sha256_out}")
 
         if self_test:
             self_check(root, work, artifacts, index_base, record)
@@ -515,6 +546,11 @@ def build_record(
 
     members: list[ArtifactRecord] = []
     for directory, (name, version, artifact, digest) in zip(MEMBERS, artifacts):
+        # A clean tree at record time does not make a package built from a dirty
+        # tree releasable: the dirty flag is stamped into the .crate bytes. Check
+        # the stamp here too, so the record is never built from such bytes even
+        # if a caller skipped the gate's earlier check.
+        verify_artifact_provenance(artifact, name, version, commit)
         manifest = root / directory / "Cargo.toml"
         manifest_name, manifest_version = manifest_identity(manifest)
         if (manifest_name, manifest_version) != (name, version):
@@ -542,12 +578,8 @@ def build_record(
     return ReleaseRecord(commit=commit, clean=clean, members=tuple(members))
 
 
-def write_record(path: Path, record: ReleaseRecord) -> None:
-    """Write the record atomically: a half-written record is not a capture."""
-    if path.is_symlink():
-        raise GateError(
-            f"refusing to write the gate record through the symbolic link {path}"
-        )
+def serialize_record(record: ReleaseRecord) -> bytes:
+    """The exact bytes of a gate record; the digest is computed from these."""
     document = {
         "format": RECORD_FORMAT,
         "commit": record.commit,
@@ -564,12 +596,28 @@ def write_record(path: Path, record: ReleaseRecord) -> None:
             for member in record.members
         ],
     }
+    return (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def write_record(path: Path, record: ReleaseRecord) -> str:
+    """Write the record atomically and return the SHA-256 of the bytes written.
+
+    Hashing the serialized bytes before the write, rather than re-reading the
+    file, means the digest the gate prints is the digest of this record even if
+    something changes the path immediately afterwards. `preflight` compares the
+    record with that digest before it parses anything.
+    """
+    if path.is_symlink():
+        raise GateError(
+            f"refusing to write the gate record through the symbolic link {path}"
+        )
+    data = serialize_record(record)
+    digest = hashlib.sha256(data).hexdigest()
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-            json.dump(document, handle, indent=2, sort_keys=True)
-            handle.write("\n")
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
@@ -582,7 +630,7 @@ def write_record(path: Path, record: ReleaseRecord) -> None:
     try:
         directory = os.open(path.parent, os.O_RDONLY)
     except OSError:
-        return
+        return digest
     try:
         os.fsync(directory)
     except OSError:
@@ -590,6 +638,45 @@ def write_record(path: Path, record: ReleaseRecord) -> None:
         pass
     finally:
         os.close(directory)
+    return digest
+
+
+def write_record_digest(path: Path, digest: str) -> None:
+    """Write only the record digest, for an out-of-band handoff.
+
+    This file is not an authority by itself: it is written in the same run that
+    wrote the record. The caller must capture it somewhere the record and
+    artifacts cannot also be changed (a CI step output, or the operator's own
+    notes) and pass that value to `preflight --expected-record-sha256`.
+    """
+    if not is_digest(digest):
+        raise GateError(f"refusing to write invalid record digest {digest!r}")
+    if path.is_symlink():
+        raise GateError(
+            f"refusing to write the record digest through the symbolic link {path}"
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(digest + "\n", encoding="utf-8", newline="\n")
+
+
+def record_digest(path: Path) -> str:
+    """Hash the record file without parsing it.
+
+    `preflight` uses this before `read_record`, so a changed or malformed record
+    is rejected against the captured digest rather than being interpreted.
+    """
+    if path.is_symlink():
+        raise GateError(f"{path} is a symbolic link; a gate record must be a real file")
+    if not path.is_file():
+        raise GateError(
+            f"{path} is missing. preflight consumes the gate record; run "
+            "`stage_gate.py gate --record PATH` first. It will not re-hash the "
+            "artifacts and call that a capture."
+        )
+    try:
+        return sha256(path)
+    except OSError as error:
+        raise GateError(f"{path} cannot be hashed: {error}") from error
 
 
 def read_record(path: Path) -> ReleaseRecord:
@@ -777,12 +864,44 @@ def verify_record_artifacts(
     return tuple(captures)
 
 
+def verify_record_digest(record_path: Path, expected: str) -> None:
+    """Compare the record's bytes with the digest captured by the gate run.
+
+    This runs before `read_record`, so a record changed after the gate wrote it
+    is refused without being parsed. The expected value must come from outside
+    the workspace that holds the record and artifacts; that separation is what
+    stops a record and its artifacts being replaced together.
+    """
+    if not is_digest(expected):
+        raise GateError(
+            f"--expected-record-sha256 {expected!r} is not a 64-character "
+            "lowercase SHA-256 digest. Pass the exact value the gate printed "
+            "when it wrote the record."
+        )
+    actual = record_digest(record_path)
+    if actual != expected:
+        raise GateError(
+            f"the gate record {record_path} hashes to {actual}, not the digest "
+            f"{expected} captured when the gate wrote it. The record changed "
+            "after the gate ran, so preflight will not parse it or ask the "
+            "registry anything. Re-run the gate and use the digest that run "
+            "printed (in CI, the gate step's output)."
+        )
+
+
 def consume_record(
     root: Path,
     record_path: Path,
     artifact_dir: Path,
+    expected_record_sha256: str,
 ) -> tuple[ReleaseRecord, tuple[Capture, ...]]:
-    """Load and fully validate the record before any plan is considered."""
+    """Load and fully validate the record before any plan is considered.
+
+    The record digest is verified first. Without it, a record and its artifacts
+    rewritten together would agree with each other and preflight could not tell
+    the pair from the gate's output.
+    """
+    verify_record_digest(record_path, expected_record_sha256)
     record = read_record(record_path)
     validate_commit(root, record)
     validate_manifests(root, record)
@@ -796,8 +915,10 @@ def recheck_record(
     record_path: Path,
     record: ReleaseRecord,
     artifact_dir: Path,
+    expected_record_sha256: str,
 ) -> None:
     """Re-prove the record before a human acts on the plan."""
+    verify_record_digest(record_path, expected_record_sha256)
     current = read_record(record_path)
     if current != record:
         raise GateError(
@@ -894,6 +1015,80 @@ def artifact_provenance(artifact: Path, name: str, version: str) -> tuple[str, b
             f"{artifact} has a non-boolean dirty flag in {member}: {dirty!r}"
         )
     return commit, dirty
+
+
+def verify_artifact_provenance(
+    artifact: Path,
+    name: str,
+    version: str,
+    commit: str,
+) -> None:
+    """Refuse an artifact stamped from another commit or a dirty tree.
+
+    The dirty check is not made redundant by a clean checkout at record time.
+    `cargo package` stamps `dirty` when it builds the package, so reverting or
+    committing the changes afterwards leaves a `.crate` whose own bytes say it
+    was built from a dirty tree. Such a package must never enter the record.
+    """
+    packaged_commit, packaged_dirty = artifact_provenance(artifact, name, version)
+    if packaged_commit != commit:
+        raise GateError(
+            f"{artifact.name} was packaged from commit {packaged_commit}, "
+            f"but the gate is recording {commit}. The artifact and the record "
+            "would name different commits; refusing to write it."
+        )
+    if packaged_dirty:
+        raise GateError(
+            f"{artifact.name} was packaged from a dirty tree: its "
+            ".cargo_vcs_info.json says dirty=true. A clean checkout now does not "
+            "change those bytes. Commit or discard the changes and re-run the "
+            "gate from a clean checkout; a package stamped dirty is not "
+            "releasable."
+        )
+
+
+def restamp_crate(
+    source: Path,
+    destination: Path,
+    name: str,
+    version: str,
+    commit: str,
+    *,
+    dirty: bool,
+) -> None:
+    """Copy a crate archive, replacing only its `.cargo_vcs_info.json`.
+
+    The self-test uses this to build a coherent sandbox: artifact stamps are
+    rewritten to the sandbox commit, and a deliberately dirty stamp is used to
+    prove the gate refuses a package built from a dirty tree even after that tree
+    is clean again.
+    """
+    stamp = f"{name}-{version}/.cargo_vcs_info.json"
+    payload = json.dumps(
+        {
+            "pkg_schema_version": 1,
+            "git": {"sha1": commit, "dirty": dirty},
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    with (
+        tarfile.open(source, "r:gz") as archive,
+        tarfile.open(destination, "w:gz") as output,
+    ):
+        for member in archive.getmembers():
+            if member.name == stamp:
+                info = tarfile.TarInfo(stamp)
+                info.size = len(payload)
+                info.mode = member.mode
+                info.mtime = member.mtime
+                info.uid = member.uid
+                info.gid = member.gid
+                info.uname = member.uname
+                info.gname = member.gname
+                output.addfile(info, io.BytesIO(payload))
+                continue
+            extracted = archive.extractfile(member)
+            output.addfile(member, extracted)
 
 
 def stage_locked(registry: Path, index_root: Path, root: Path, index_base: str) -> int:
@@ -1146,17 +1341,28 @@ def preflight_release(
     record_path: Path,
     artifact_dir: Path,
     index_base: str,
+    *,
+    expected_record_sha256: str,
 ) -> ReleasePlan:
     """Consume the gate record and report the manual plan.
 
-    The record is validated in full before anything else: commit, clean flag,
-    manifests, and artifact bytes. A stale record or a changed artifact is an
-    error, never a new capture. Nothing is published. A blocking registry state
-    is an error; a member that is merely absent is work for a human, reported
-    with the commands and the digest to check afterwards.
+    The record is first checked against the digest the gate printed when it
+    wrote that record. The digest must have been captured out of band; a record
+    and its artifacts rewritten together then hash to something else and are
+    refused before the record is parsed. The record is validated in full before
+    anything else: commit, clean flag, manifests, and artifact bytes. A stale
+    record or a changed artifact is an error, never a new capture. Nothing is
+    published. A blocking registry state is an error; a member that is merely
+    absent is work for a human, reported with the commands and the digest to
+    check afterwards.
     """
     require_repository(root)
-    record, captures = consume_record(root, record_path, artifact_dir)
+    record, captures = consume_record(
+        root,
+        record_path,
+        artifact_dir,
+        expected_record_sha256,
+    )
 
     print(
         f"gate record: {record_path} (commit {record.commit}, clean "
@@ -1207,7 +1413,13 @@ def preflight_release(
     # The plan is only meaningful for the bytes and checkout the record
     # describes. Re-prove that; do not re-hash the artifacts into a new
     # reference.
-    recheck_record(root, record_path, record, artifact_dir)
+    recheck_record(
+        root,
+        record_path,
+        record,
+        artifact_dir,
+        expected_record_sha256,
+    )
 
     if plan.pending:
         print_manual_plan(plan)
@@ -1528,25 +1740,32 @@ def self_check(
         description="both members restored at the gate checksums",
     )
 
-    # 5. The gate artifact is byte-stable for BOTH packages, and there is no
+    # 5. A package stamped dirty must never enter the record, even when the tree
+    #    is clean by the time the record is built.
+    verify_dirty_provenance(root, work, artifacts)
+
+    # 6. The gate artifact is byte-stable for BOTH packages, and there is no
     #    publishing path in this program.
     verify_package_stability(root, work, artifacts)
     verify_no_publish_path(root)
 
-    # 6. Unsafe cleanup guards.
+    # 7. Unsafe cleanup guards.
     test_cleanup_guards()
 
-    # 7. The full gate from outside the repository root. This is a subprocess, so
+    # 8. The full gate from outside the repository root. This is a subprocess, so
     #    it also exercises the default --root and every path argument from a cwd
     #    that is not the checkout.
     verify_gate_from_outside(root, artifacts, index_base, record_path)
 
     print(
         "self-test passed: the gate rejects a missing or drifted core; both "
-        "members are byte-stable; the gate record is rejected when its commit, "
-        "manifest or artifact changes between gate and preflight; mismatched and "
-        "matching-but-yanked states block with zero pending publishes, and this "
-        "program has no publishing path."
+        "members are byte-stable; a package stamped dirty is refused even after "
+        "the tree is clean; the gate record is rejected when its commit, manifest "
+        "or artifact changes between gate and preflight, and a record and "
+        "artifact mutated together are rejected against the digest captured when "
+        "the gate wrote the record; mismatched and matching-but-yanked states "
+        "block with zero pending publishes, and this program has no publishing "
+        "path."
     )
 
 
@@ -1560,6 +1779,112 @@ def mirror_state_index(
     for name in (core_name, last_name):
         path = index / index_path(name)
         path.write_text(original[name] + "\n", encoding="utf-8")
+
+
+def verify_dirty_provenance(
+    root: Path,
+    work: Path,
+    artifacts: list[tuple[str, str, Path, str]],
+) -> None:
+    """A package stamped dirty stays dirty after the tree is clean again.
+
+    The sandbox has a clean Git checkout, but the core artifact's
+    `.cargo_vcs_info.json` is restamped `dirty=true` at that same commit. This is
+    what a package built from uncommitted changes and then committed or reverted
+    looks like: `git status` is empty, while the `.crate` bytes still say the
+    build was dirty. `build_record` must refuse it, because a clean tree at
+    record time cannot retroactively clean the package.
+    """
+    sandbox = work / "dirty-provenance"
+    if sandbox.exists() or sandbox.is_symlink():
+        raise GateError(
+            f"self-test: refusing to reuse {sandbox}; the dirty-package check "
+            "needs a directory this run created"
+        )
+    sandbox.mkdir()
+    try:
+        for directory in MEMBERS:
+            target = sandbox / directory
+            target.mkdir()
+            shutil.copy2(root / directory / "Cargo.toml", target / "Cargo.toml")
+        init_git_repository(sandbox)
+        commit = git_head(sandbox)
+        if git_status(sandbox):
+            raise GateError("self-test: the dirty-package sandbox is not clean")
+
+        name, version, artifact, _digest = artifacts[0]
+        last_name, last_version, last_artifact, _last_digest = artifacts[-1]
+
+        artifact_dir = sandbox / "target" / "package"
+        artifact_dir.mkdir(parents=True)
+        dirty_core = artifact_dir / f"{name}-{version}.crate"
+        restamp_crate(artifact, dirty_core, name, version, commit, dirty=True)
+        clean_last = artifact_dir / f"{last_name}-{last_version}.crate"
+        restamp_crate(
+            last_artifact,
+            clean_last,
+            last_name,
+            last_version,
+            commit,
+            dirty=False,
+        )
+
+        # The tree is clean now. Only the artifact stamp carries the dirtiness.
+        if git_status(sandbox):
+            raise GateError(
+                "self-test: the dirty-package tree is not clean after restamping"
+            )
+        try:
+            build_record(
+                sandbox,
+                [
+                    (name, version, dirty_core, sha256(dirty_core)),
+                    (
+                        last_name,
+                        last_version,
+                        clean_last,
+                        sha256(clean_last),
+                    ),
+                ],
+                commit=commit,
+            )
+        except GateError as error:
+            assert_message(
+                str(error),
+                "dirty=true",
+                description="a package stamped dirty is named as the reason",
+            )
+        else:
+            raise GateError(
+                "self-test: build_record accepted a package stamped dirty after "
+                "the tree became clean"
+            )
+        print("   ok: a package stamped dirty is refused after the tree is clean")
+
+        # The same artifacts with an honest stamp build a record, so the refusal
+        # above is about the stamp and not a broken sandbox.
+        clean_dir = artifact_dir / "clean-stamps"
+        clean_dir.mkdir()
+        clean_core = clean_dir / f"{name}-{version}.crate"
+        restamp_crate(artifact, clean_core, name, version, commit, dirty=False)
+        record = build_record(
+            sandbox,
+            [
+                (name, version, clean_core, sha256(clean_core)),
+                (
+                    last_name,
+                    last_version,
+                    clean_last,
+                    sha256(clean_last),
+                ),
+            ],
+            commit=commit,
+        )
+        if not record.clean:
+            raise GateError("self-test: the clean-stamp sandbox record is dirty")
+        print("   ok: the same artifacts with a clean stamp build a record")
+    finally:
+        remove_owned(sandbox, work)
 
 
 def verify_record_between_gate_and_preflight(
@@ -1589,29 +1914,51 @@ def verify_record_between_gate_and_preflight(
     try:
         shutil.copy2(root / "Cargo.toml", sandbox / "Cargo.toml")
         shutil.copy2(root / "Cargo.lock", sandbox / "Cargo.lock")
-        (sandbox / ".gitignore").write_text("/target\n", encoding="utf-8")
-
-        artifact_dir = sandbox / "target" / "package"
-        artifact_dir.mkdir(parents=True)
-        copied: list[tuple[str, str, Path, str]] = []
         for directory in MEMBERS:
             target = sandbox / directory
             target.mkdir()
             shutil.copy2(root / directory / "Cargo.toml", target / "Cargo.toml")
-        for name, version, artifact, digest in artifacts:
-            copy = artifact_dir / f"{name}-{version}.crate"
-            shutil.copy2(artifact, copy)
-            copied.append((name, version, copy, digest))
 
         init_git_repository(sandbox)
-        record = build_record(sandbox, copied)
+        sandbox_commit = git_head(sandbox)
+
+        # The real artifacts carry the real repository's commit. Restamp the
+        # copies to the sandbox commit so the record contract talks about one
+        # coherent tree, and recompute their digests from the restamped bytes.
+        artifact_dir = sandbox / "target" / "package"
+        artifact_dir.mkdir(parents=True)
+        copied: list[tuple[str, str, Path, str]] = []
+        for name, version, artifact, _digest in artifacts:
+            copy = artifact_dir / f"{name}-{version}.crate"
+            restamp_crate(
+                artifact,
+                copy,
+                name,
+                version,
+                sandbox_commit,
+                dirty=False,
+            )
+            copied.append((name, version, copy, sha256(copy)))
+
+        # The index lines carry the real repository's checksums. The restamped
+        # copies hash differently, so build sandbox-local lines from the copied
+        # digests; otherwise preflight would correctly report the registry bytes
+        # as different from the record the sandbox is testing.
+        cksums = {name: digest for name, _version, _path, digest in copied}
+        sandbox_original: dict[str, str] = {}
+        for member_name in (core_name, last_name):
+            entry = json.loads(original[member_name])
+            entry["cksum"] = cksums[member_name]
+            sandbox_original[member_name] = json.dumps(entry, separators=(",", ":"))
+
+        record = build_record(sandbox, copied, commit=sandbox_commit)
         if not record.clean:
             raise GateError(
                 "self-test: the record contract sandbox is dirty before the record "
                 "was written"
             )
         record_path = work / "record-contract.json"
-        write_record(record_path, record)
+        record_digest = write_record(record_path, record)
         if read_record(record_path) != record:
             raise GateError("self-test: the gate record did not round-trip")
 
@@ -1620,11 +1967,11 @@ def verify_record_between_gate_and_preflight(
         index = work / "record-contract-index"
         index.mkdir()
         for member_name in (core_name, last_name):
-            append_index(index, member_name, original[member_name])
+            append_index(index, member_name, sandbox_original[member_name])
         base = index.resolve().as_uri().rstrip("/") + "/"
 
         status, output = run_preflight_record(
-            sandbox, record_path, artifact_dir, base, outside
+            sandbox, record_path, record_digest, artifact_dir, base, outside
         )
         if status != 0:
             raise GateError(
@@ -1648,6 +1995,78 @@ def verify_record_between_gate_and_preflight(
         if (core_record.name, last_record.name) != (core_name, last_name):
             raise GateError("self-test: the record members are not in release order")
 
+        original_record_bytes = record_path.read_bytes()
+        if sha256(record_path) != record_digest:
+            raise GateError(
+                "self-test: the record digest does not describe the record the "
+                "gate just wrote"
+            )
+
+        # A record that no longer hashes to the captured value must be refused
+        # before it is parsed. Corrupting the JSON proves the digest check runs
+        # ahead of the parser rather than only after a successful read.
+        record_path.write_bytes(b"{ not a gate record")
+        status, output = run_preflight_record(
+            sandbox, record_path, record_digest, artifact_dir, base, outside
+        )
+        expect_preflight_refusal(
+            status,
+            output,
+            "captured when the gate wrote it",
+            description="a record changed into invalid JSON after the gate",
+        )
+        assert_not_message(
+            output,
+            "not a readable gate record",
+            description="the record digest is checked before parsing",
+        )
+        record_path.write_bytes(original_record_bytes)
+        print(
+            "   ok: a changed record is refused against the captured digest "
+            "before it is parsed"
+        )
+
+        # Change an artifact and rewrite the record so the two agree. Without an
+        # independently captured record digest this is a consistent pair: every
+        # recorded digest matches the file beside it. The captured digest is the
+        # only input that still ties the record to the gate run.
+        forged_artifact = artifact_dir / core_record.artifact
+        original_artifact_bytes = forged_artifact.read_bytes()
+        forged_artifact.write_bytes(
+            original_artifact_bytes + b"\nforged between gate and preflight\n"
+        )
+        forged_digest = sha256(forged_artifact)
+        forged = json.loads(original_record_bytes)
+        for entry in forged["members"]:
+            if entry["name"] == core_record.name:
+                entry["sha256"] = forged_digest
+        record_path.write_text(
+            json.dumps(forged, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        if record_digest == sha256(record_path):
+            raise GateError("self-test: the forged record hash is unchanged")
+        status, output = run_preflight_record(
+            sandbox, record_path, record_digest, artifact_dir, base, outside
+        )
+        expect_preflight_refusal(
+            status,
+            output,
+            "captured when the gate wrote it",
+            description="a record and artifact mutated together",
+        )
+        assert_not_message(
+            output,
+            "publishing is manual",
+            description="a forged record never reaches a plan",
+        )
+        record_path.write_bytes(original_record_bytes)
+        forged_artifact.write_bytes(original_artifact_bytes)
+        print(
+            "   ok: a record and artifact mutated together are refused against "
+            "the digest captured from the gate"
+        )
+
         # The artifact changes after the gate wrote the record. Preflight must
         # compare with the record, not adopt the new hash.
         mutated = artifact_dir / core_record.artifact
@@ -1655,7 +2074,7 @@ def verify_record_between_gate_and_preflight(
         with mutated.open("ab") as handle:
             handle.write(b"mutated between gate and preflight")
         status, output = run_preflight_record(
-            sandbox, record_path, artifact_dir, base, outside
+            sandbox, record_path, record_digest, artifact_dir, base, outside
         )
         expect_preflight_refusal(
             status,
@@ -1676,7 +2095,7 @@ def verify_record_between_gate_and_preflight(
 
         mutated.unlink()
         status, output = run_preflight_record(
-            sandbox, record_path, artifact_dir, base, outside
+            sandbox, record_path, record_digest, artifact_dir, base, outside
         )
         expect_preflight_refusal(
             status,
@@ -1693,7 +2112,7 @@ def verify_record_between_gate_and_preflight(
             manifest_text + "\n# changed after the gate\n", encoding="utf-8"
         )
         status, output = run_preflight_record(
-            sandbox, record_path, artifact_dir, base, outside
+            sandbox, record_path, record_digest, artifact_dir, base, outside
         )
         expect_preflight_refusal(
             status,
@@ -1708,7 +2127,7 @@ def verify_record_between_gate_and_preflight(
         source.parent.mkdir()
         source.write_text("pub fn changed() {}\n", encoding="utf-8")
         status, output = run_preflight_record(
-            sandbox, record_path, artifact_dir, base, outside
+            sandbox, record_path, record_digest, artifact_dir, base, outside
         )
         expect_preflight_refusal(
             status,
@@ -1723,7 +2142,7 @@ def verify_record_between_gate_and_preflight(
         (sandbox / "stale.txt").write_text("a newer commit\n", encoding="utf-8")
         commit_all(sandbox, "move HEAD after the gate record")
         status, output = run_preflight_record(
-            sandbox, record_path, artifact_dir, base, outside
+            sandbox, record_path, record_digest, artifact_dir, base, outside
         )
         expect_preflight_refusal(
             status,
@@ -1741,10 +2160,10 @@ def verify_record_between_gate_and_preflight(
 
         # The registry states, driven through the same CLI. Each run consumes
         # the same record and never uploads.
-        mirror_state_index(index, original, core_name, last_name)
+        mirror_state_index(index, sandbox_original, core_name, last_name)
         remove_index(index, last_name)
         status, output = run_preflight_record(
-            sandbox, record_path, artifact_dir, base, outside
+            sandbox, record_path, record_digest, artifact_dir, base, outside
         )
         if status != 0:
             raise GateError(
@@ -1793,10 +2212,10 @@ def verify_record_between_gate_and_preflight(
                 "matching but yanked",
             ),
         ):
-            mirror_state_index(index, original, core_name, last_name)
+            mirror_state_index(index, sandbox_original, core_name, last_name)
             rewrite_entry(index, last_name, **injected)
             status, output = run_preflight_record(
-                sandbox, record_path, artifact_dir, base, outside
+                sandbox, record_path, record_digest, artifact_dir, base, outside
             )
             expect_preflight_refusal(
                 status,
@@ -1805,10 +2224,10 @@ def verify_record_between_gate_and_preflight(
                 description=f"a provider published at {description}",
             )
 
-        mirror_state_index(index, original, core_name, last_name)
+        mirror_state_index(index, sandbox_original, core_name, last_name)
         remove_index(index, core_name)
         status, output = run_preflight_record(
-            sandbox, record_path, artifact_dir, base, outside
+            sandbox, record_path, record_digest, artifact_dir, base, outside
         )
         expect_preflight_refusal(
             status,
@@ -1817,11 +2236,11 @@ def verify_record_between_gate_and_preflight(
             description="a provider published while the core is absent",
         )
 
-        mirror_state_index(index, original, core_name, last_name)
+        mirror_state_index(index, sandbox_original, core_name, last_name)
         remove_index(index, core_name)
         remove_index(index, last_name)
         status, output = run_preflight_record(
-            sandbox, record_path, artifact_dir, base, outside
+            sandbox, record_path, record_digest, artifact_dir, base, outside
         )
         if status != 0:
             raise GateError(
@@ -1850,6 +2269,7 @@ def verify_record_between_gate_and_preflight(
 def run_preflight_record(
     root: Path,
     record_path: Path,
+    expected_record_sha256: str,
     artifact_dir: Path,
     base: str,
     cwd: Path,
@@ -1862,6 +2282,8 @@ def run_preflight_record(
         str(root),
         "--record",
         str(record_path),
+        "--expected-record-sha256",
+        expected_record_sha256,
         "--artifact-dir",
         str(artifact_dir),
         "--index-base",
@@ -2132,6 +2554,7 @@ def verify_gate_from_outside(
     record_path: Path,
 ) -> None:
     outside = Path(tempfile.mkdtemp(prefix="stage-gate-outside-gate-"))
+    digest_path = record_path.with_name(record_path.name + ".sha256")
     try:
         command = [
             sys.executable,
@@ -2143,6 +2566,8 @@ def verify_gate_from_outside(
             index_base,
             "--record",
             str(record_path),
+            "--record-sha256-out",
+            str(digest_path),
         ]
         result = subprocess.run(
             command,
@@ -2182,11 +2607,28 @@ def verify_gate_from_outside(
                     f"self-test: the outside-root gate recorded {member.name} at "
                     f"{member.sha256}, not {expected.get(member.name)}"
                 )
+        if not digest_path.is_file():
+            raise GateError(
+                "self-test: the gate did not write the record digest it was asked for"
+            )
+        handoff = digest_path.read_text(encoding="utf-8").strip()
+        actual = sha256(record_path)
+        if handoff != actual:
+            raise GateError(
+                f"self-test: the gate wrote record digest {handoff}, but the "
+                f"record hashes to {actual}; preflight would reject its own run"
+            )
+        assert_message(
+            output,
+            f"record sha256: {actual}",
+            description="the gate printed the digest of the record it wrote",
+        )
         print(
             "   ok: the gate ran from outside the repository root, reproduced "
-            "both artifacts and rewrote the record"
+            "both artifacts, rewrote the record and handed off its digest"
         )
     finally:
+        digest_path.unlink(missing_ok=True)
         remove_owned(outside, outside.parent)
 
 

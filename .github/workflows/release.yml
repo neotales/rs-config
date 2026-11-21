@@ -16,12 +16,15 @@ name: release
 # What remains is the proof that is real: the group packages together, in
 # dependency order, against a staged registry built from the committed
 # `Cargo.lock`; the gate writes one machine-readable record naming the commit,
-# the clean flag, and each verified artifact's SHA-256 and manifest digest; and
-# preflight consumes exactly that record, refusing a stale commit, a changed
-# manifest, a missing artifact or an artifact whose bytes no longer match before
-# it asks crates.io anything. The recorded digest is what a human compares with
-# the artifact downloaded after a manual publish. See RELEASE.md, section
-# "Publishing by hand".
+# the clean flag, and each verified artifact's SHA-256 and manifest digest, and
+# prints the SHA-256 of that record; and preflight consumes exactly that record,
+# refusing a stale commit, a changed manifest, a missing artifact or an artifact
+# whose bytes no longer match before it asks crates.io anything. The record's own
+# digest is captured as a step output from the gate step and passed to preflight
+# as a separate input, so a record and its artifacts rewritten together after the
+# gate does not agree with the value this job already holds. The recorded digest
+# is what a human compares with the artifact downloaded after a manual publish.
+# See RELEASE.md, section "Publishing by hand".
 #
 # This repository is a virtual workspace: the crates live in top-level
 # directories, `config/` is `neotales-config`, and `keepass/` is
@@ -84,20 +87,31 @@ jobs:
       # reaches that job; this is the pre-flight that tells you the tree
       # packages and the version can be released before you tag it. The gate
       # writes the record preflight consumes; the path is outside the checkout
-      # so writing it cannot change the tree the record describes.
+      # so writing it cannot change the tree the record describes. The gate also
+      # writes the record's SHA-256 to a separate path, which this step captures
+      # as its output. That value comes from the runner's step context, not from
+      # the workspace, so a later rewrite of the record and artifacts cannot
+      # change it.
       - name: Verify the provider packages against the candidate core
+        id: gate
         if: github.event_name == 'workflow_dispatch'
         run: |
           set -euo pipefail
           python3 eng/release/stage_gate.py gate \
-            --record "$RUNNER_TEMP/gate-record.json"
+            --record "$RUNNER_TEMP/gate-record.json" \
+            --record-sha256-out "$RUNNER_TEMP/gate-record.sha256"
+          digest=$(cat "$RUNNER_TEMP/gate-record.sha256")
+          echo "record_sha256=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Consume the gate record and report the manual plan
         if: github.event_name == 'workflow_dispatch'
+        env:
+          EXPECTED_RECORD_SHA256: ${{ steps.gate.outputs.record_sha256 }}
         run: |
           set -euo pipefail
           python3 eng/release/stage_gate.py preflight \
             --record "$RUNNER_TEMP/gate-record.json" \
+            --expected-record-sha256 "$EXPECTED_RECORD_SHA256" \
             --artifact-dir target/package
 
   version:
@@ -175,26 +189,38 @@ jobs:
           cache-key: release-verify
 
       # The gate packages and verifies the group against a staged registry
-      # built from Cargo.lock, then writes the durable record of the captured
-      # digests. Nothing publishes.
+      # built from Cargo.lock, writes the durable record of the captured
+      # digests, and writes that record's SHA-256 to a separate path. This step
+      # captures the digest as its output immediately, so the value lives in the
+      # runner's step context rather than in the workspace the record and
+      # artifacts sit in. Nothing publishes.
       - name: Verify the group packages as a group
+        id: gate
         run: |
           set -euo pipefail
           python3 eng/release/stage_gate.py gate \
-            --record "$RUNNER_TEMP/gate-record.json"
+            --record "$RUNNER_TEMP/gate-record.json" \
+            --record-sha256-out "$RUNNER_TEMP/gate-record.sha256"
+          digest=$(cat "$RUNNER_TEMP/gate-record.sha256")
+          echo "record_sha256=$digest" >> "$GITHUB_OUTPUT"
 
-      # Consumes exactly the record above. It validates the recorded commit,
-      # clean flag, manifests and artifact bytes before any registry query, so a
-      # modified or missing artifact stops the run before a plan exists. It does
-      # not repackage, and it does not re-hash an artifact into a new reference.
-      # The registry comparison is read-only.
+      # Consumes exactly the record above. The record bytes are checked against
+      # the digest captured from the gate step before the record is parsed; a
+      # record and artifacts rewritten together still fail that comparison. It
+      # then validates the recorded commit, clean flag, manifests and artifact
+      # bytes before any registry query, so a modified or missing artifact stops
+      # the run before a plan exists. It does not repackage, and it does not
+      # re-hash an artifact into a new reference. The registry comparison is
+      # read-only.
       - name: Consume the gate record and the manual plan
         env:
+          EXPECTED_RECORD_SHA256: ${{ steps.gate.outputs.record_sha256 }}
           PLAN: ${{ runner.temp }}/preflight.txt
         run: |
           set -euo pipefail
           python3 eng/release/stage_gate.py preflight \
             --record "$RUNNER_TEMP/gate-record.json" \
+            --expected-record-sha256 "$EXPECTED_RECORD_SHA256" \
             --artifact-dir target/package | tee "$PLAN"
 
       # The digests above are only meaningful for this exact tag, from an

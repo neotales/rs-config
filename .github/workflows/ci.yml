@@ -100,9 +100,11 @@ jobs:
       # anything is not a gate. The injection stages the registry without the
       # core and with a drifted core version, rejects a provider or core
       # published at different bytes or matching-but-yanked with zero pending
-      # publishes, proves both packages are byte-stable, writes the gate record,
-      # then mutates a copy of the artifact, removes one, edits a manifest, moves
-      # the commit and changes a source file between gate and preflight and
+      # publishes, proves both packages are byte-stable, refuses a package
+      # stamped dirty even after the tree is clean, writes the gate record,
+      # hands off its digest, then mutates a copy of the artifact, removes one,
+      # edits a manifest, moves the commit, changes a source file, and rewrites
+      # the record and an artifact together between gate and preflight and
       # requires each to be refused before a plan; proves the program has no
       # publishing path or token read; and runs the gate from outside the
       # repository root. Nothing is published.
