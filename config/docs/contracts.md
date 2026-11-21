@@ -132,6 +132,13 @@ Interpolation is on by default and uses `neotales-env`:
   evaluated. `${NAME-default}` without the colon is malformed;
   a colon introduces only the default, assign, or required form. A process name whose value is not
   Unicode is treated as unset.
+- A reference may nest inside a default, assign, or required operand. The outer operator is the
+  first `:` outside a nested `${…}`, so an operator inside the operand never becomes the outer one.
+  A token with no genuine nested reference, including one whose braces are literal or whose
+  reference is escaped, is handed to `neotales-env` unchanged, so its operator search, results, and
+  errors are unchanged too. More than `DotenvFile::MAX_NESTING_DEPTH` references open at once
+  rejects the source as invalid before expansion starts; the bound is checked iteratively on the raw
+  value, so a deeply nested document cannot exhaust the stack.
 - A duplicate assignment sees the earlier expanded value and then replaces it. A forward reference
   reads the environment, not a later assignment.
 - Expansion runs for every assignment, selected or not. A malformed reference in an unselected

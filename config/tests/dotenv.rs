@@ -9,6 +9,7 @@ use std::{
 };
 
 use neotales_config::{Builder, DotenvFile, SourceErrorKind, Value};
+use neotales_env::ExpandOptions;
 
 /// Distinctive enough that a leak into an error is visible.
 const SECRET: &str = "fixture-secret-9f3a2c";
@@ -792,6 +793,156 @@ fn an_outer_assign_with_a_nested_operand_stores_it_as_written() {
         config.get::<String>("SECOND").unwrap(),
         "${INNER:-inner-default}"
     );
+}
+
+#[test]
+fn a_token_without_a_nested_reference_keeps_the_upstream_grammar() {
+    // Only a genuine `${…}` inside a token makes this source split the token itself. A literal brace
+    // or an escaped reference must leave `neotales-env`'s substring operator search, its result, and
+    // its errors exactly as they are, so `neotales-env` is the oracle for every case here.
+    let cases = [
+        // The reported regression: the `:-` after `foo` is inside literal braces, so it is not an
+        // operator here, and upstream rejects the token's name.
+        "${MISSING:foo:-bar{z}}",
+        // An operator search that lands inside a brace must not become a value.
+        "${NEOTALES_CONFIG_DOTENV_MISSING_9F3A2C:b{c}:-d}",
+        // An escaped reference is text, so an operator inside it is not at the outer brace depth;
+        // upstream rejects the name and so must this source.
+        "${NEOTALES_CONFIG_DOTENV_MISSING_9F3A2C:foo\\${B:-x}}",
+        // Literal braces and escaped references that upstream accepts keep their exact result.
+        "${NEOTALES_CONFIG_DOTENV_MISSING_9F3A2C:-bar{z}}",
+        "${NEOTALES_CONFIG_DOTENV_MISSING_9F3A2C:-\\${B}}",
+        "${NEOTALES_CONFIG_DOTENV_MISSING_9F3A2C:-a$${B}}",
+        // A literal brace outside the nested reference must not stop the genuine one from resolving.
+        "${NEOTALES_CONFIG_DOTENV_MISSING_9F3A2C:-x{y${B}}}",
+    ];
+    let environment = [("B", "bval")];
+    for value in cases {
+        let file = Fixture::new(format!("APP_VALUE={value}\n"));
+        let built = Builder::new()
+            .dotenv_file(
+                "dotenv",
+                DotenvFile::new(file.path())
+                    .prefix("APP_")
+                    .with_environment(environment),
+            )
+            .build();
+        let expected = ExpandOptions::new()
+            .with_get(|name| {
+                environment
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_owned())
+            })
+            .with_set(|_, _| Ok(()))
+            .expand(value);
+
+        match (&built, &expected) {
+            (Ok(config), Ok(expected)) => assert_eq!(
+                &config.get::<String>("VALUE").unwrap(),
+                expected,
+                "this source and neotales-env disagree on {value}"
+            ),
+            (Err(error), Err(_)) => assert_eq!(
+                error.source_kind(),
+                Some(SourceErrorKind::Invalid),
+                "this source and neotales-env disagree on {value}"
+            ),
+            _ => panic!("this source and neotales-env disagree on {value}"),
+        }
+    }
+}
+
+#[test]
+fn an_escaped_reference_inside_a_nested_operand_stays_literal() {
+    let file = Fixture::new(
+        "APP_ESCAPED=${NEOTALES_CONFIG_DOTENV_MISSING_9F3A2C:${NO_INNER:-\\${HOME}}}\nAPP_PRESENT=${NEOTALES_CONFIG_DOTENV_MISSING_9F3A2C:${INNER:-\\${HOME}}}\nAPP_LITERAL=${NEOTALES_CONFIG_DOTENV_MISSING_9F3A2C:-x{y\\${HOME}}}\n",
+    );
+    let config = Builder::new()
+        .dotenv_file(
+            "dotenv",
+            DotenvFile::new(file.path())
+                .prefix("APP_")
+                .with_environment([("INNER", "inner-value")]),
+        )
+        .build()
+        .expect("the dotenv source builds");
+
+    assert_eq!(config.get::<String>("ESCAPED").unwrap(), "${HOME}");
+    assert_eq!(config.get::<String>("PRESENT").unwrap(), "inner-value");
+    assert_eq!(config.get::<String>("LITERAL").unwrap(), "x{y${HOME}}");
+}
+
+/// Builds a value with `depth` references open at once, all missing so the innermost operand wins.
+fn nested_value(depth: usize) -> String {
+    let mut value = String::new();
+    for index in 0..depth {
+        value.push_str("${NO_DEPTH_");
+        value.push_str(&index.to_string());
+        value.push(':');
+    }
+    value.push_str("ok");
+    for _ in 0..depth {
+        value.push('}');
+    }
+    value
+}
+
+#[test]
+fn a_reference_may_nest_up_to_the_documented_bound_and_no_further() {
+    let at_the_bound = nested_value(DotenvFile::MAX_NESTING_DEPTH);
+    let file = Fixture::new(format!("APP_VALUE={at_the_bound}\n"));
+    let config = Builder::new()
+        .dotenv_file("dotenv", DotenvFile::new(file.path()).prefix("APP_"))
+        .build()
+        .expect("a value at the documented depth builds");
+    assert_eq!(config.get::<String>("VALUE").unwrap(), "ok");
+
+    let past_the_bound = nested_value(DotenvFile::MAX_NESTING_DEPTH + 1);
+    let file = Fixture::new(format!("APP_VALUE={past_the_bound}\n"));
+    let error = Builder::new()
+        .dotenv_file("dotenv", DotenvFile::new(file.path()).prefix("APP_"))
+        .build()
+        .expect_err("a value past the documented depth rejects the source");
+    assert_eq!(error.source_kind(), Some(SourceErrorKind::Invalid));
+}
+
+#[test]
+fn an_adversarial_nesting_depth_is_rejected_without_panicking() {
+    // Far past the bound and far past any stack-safe recursion, in both a balanced and an
+    // unterminated form. The check is iterative and stops as soon as the bound is passed, so the
+    // source is invalid rather than a crash.
+    let balanced = format!("{}x{SECRET}{}", "${A:".repeat(100_000), "}".repeat(100_000));
+    let unterminated = format!("{}{SECRET}", "${A:".repeat(100_000));
+    for value in [balanced, unterminated] {
+        let file = Fixture::new(format!("APP_VALUE={value}\n"));
+        let error = Builder::new()
+            .dotenv_file("dotenv", DotenvFile::new(file.path()).prefix("APP_"))
+            .build()
+            .expect_err("deep nesting rejects the source");
+
+        assert_eq!(error.source_kind(), Some(SourceErrorKind::Invalid));
+        for text in [format!("{error}"), format!("{error:?}")] {
+            assert!(
+                !text.contains(SECRET),
+                "the value reached the error: {text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn literal_and_escaped_braces_do_not_count_against_the_bound() {
+    // Escaped references and literal braces never nest, however many a value holds, so the value is
+    // not rejected and every one stays literal.
+    let value = "\\${A}".repeat(1_000);
+    let file = Fixture::new(format!("APP_VALUE={value}\n"));
+    let config = Builder::new()
+        .dotenv_file("dotenv", DotenvFile::new(file.path()).prefix("APP_"))
+        .build()
+        .expect("escaped references do not nest");
+
+    assert_eq!(config.get::<String>("VALUE").unwrap(), "${A}".repeat(1_000));
 }
 
 #[test]

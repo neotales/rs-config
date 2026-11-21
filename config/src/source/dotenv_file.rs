@@ -69,12 +69,19 @@ use super::{
 /// assignment sees the operand literally. Use a literal default when a later assignment reads the
 /// stored name.
 ///
-/// A reference may be nested inside the `text` of a default, assign, or required operand, to any
-/// depth: `${A:-${B:-fallback}}`, `${A:${B:-fallback}}`, `${A:=${B:-fallback}}`, and
+/// A reference may be nested inside the `text` of a default, assign, or required operand:
+/// `${A:-${B:-fallback}}`, `${A:${B:-fallback}}`, `${A:=${B:-fallback}}`, and
 /// `${A:${B:${C:-fallback}}}` all resolve. The outer operator is the first `:` outside a nested
 /// `${…}`, so an operator inside the operand never becomes the outer one, and the operand is
 /// expanded after the outer value is found missing. When the outer value is present, the operand is
 /// not expanded at all, so a `${…:?…}` or `${…:=…}` inside it has no effect.
+///
+/// Nesting is bounded, not unlimited: a value with more than [`Self::MAX_NESTING_DEPTH`] references
+/// open at once is rejected as [`SourceError::invalid`] before any expansion work starts. The bound
+/// keeps a hostile document from exhausting the stack or making the expansion superlinear. A token
+/// whose braces are all literal, such as `${A:-bar{z}}`, and a token whose reference is escaped,
+/// such as `${A:-\${B}}`, are not nested references: they are handed to `neotales-env` exactly as
+/// written, so its grammar, its `:=` behavior, and its errors are unchanged.
 ///
 /// This is not a shell. The parser and expander never execute a command, never perform word
 /// splitting or globbing, and never read a positional parameter or an array. `${NAME-default}`
@@ -131,6 +138,15 @@ impl fmt::Debug for DotenvFile {
 }
 
 impl DotenvFile {
+    /// The greatest number of `${…}` references a value may have open at once.
+    ///
+    /// A reference can sit inside another reference's operand, so a value can nest. Expansion is
+    /// recursive, so this source bounds the depth: a value that nests deeper is rejected with an
+    /// invalid source before any expansion begins. The bound applies to the whole value, so both
+    /// this source's brace-aware split and the recursive operand expansion of `neotales-env` stay
+    /// inside it.
+    pub const MAX_NESTING_DEPTH: usize = 16;
+
     /// Registers `path` to be read when the source loads.
     ///
     /// The path is opened once per load. It is never followed into another file and never
@@ -234,11 +250,17 @@ impl DotenvFile {
     /// environment, read with [`neotales_env::get_var`]; [`Self::with_environment`] substitutes a
     /// fixed map. The setter writes only `scope`, so a `${NAME:=text}` assignment is visible to a
     /// later value in the same load and never reaches the process.
+    ///
+    /// The nesting bound is checked on the raw value first, before a callback or a buffer is
+    /// created, so a value past [`Self::MAX_NESTING_DEPTH`] is rejected without descending at all.
     fn expand_value(
         &self,
         value: &str,
         scope: &RefCell<BTreeMap<String, String>>,
     ) -> Result<String, SourceError> {
+        if !within_nesting_bound(value) {
+            return Err(SourceError::invalid());
+        }
         let environment = self.environment.as_ref();
         let mut options = ExpandOptions::new()
             .with_get(|name| lookup_local(scope, environment, name))
@@ -248,9 +270,10 @@ impl DotenvFile {
             });
         // `neotales-env` reads a braced token with brace awareness but then splits it with a plain
         // substring search, so an operator inside a nested `${…}` can be taken for the outer one.
-        // This wrapper keeps every token without a nested reference exactly as it was written and
-        // splits only a token that has one, at its outer brace depth.
-        expand_nested(value, &mut options, scope, environment)
+        // Only a token that holds a genuine nested reference is split here, at its outer brace
+        // depth; every other token is handed over unchanged, including one whose braces are literal
+        // or escaped.
+        expand_nested(value, &mut options, scope, environment, 0)
     }
 
     fn build(&self) -> Result<Value, SourceError> {
@@ -373,12 +396,20 @@ enum Operator {
 /// Text that holds no braced reference is copied, `\$` and `$$` become one literal `$`, and an
 /// unbraced `$NAME` is resolved as `neotales-env` resolves it. A braced reference is passed to
 /// [`expand_token`]. Lookups and stores always use the same per-load scope and environment.
+///
+/// `depth` is the number of references already open around this text. It is threaded only as a
+/// defensive check; [`within_nesting_bound`] has already rejected a value that could exceed
+/// [`DotenvFile::MAX_NESTING_DEPTH`], so the check cannot fire for a checked value.
 fn expand_nested(
     value: &str,
     options: &mut ExpandOptions<'_>,
     scope: &RefCell<BTreeMap<String, String>>,
     environment: Option<&BTreeMap<String, String>>,
+    depth: usize,
 ) -> Result<String, SourceError> {
+    if depth > DotenvFile::MAX_NESTING_DEPTH {
+        return Err(SourceError::invalid());
+    }
     let characters: Vec<char> = value.chars().collect();
     let mut output = String::with_capacity(value.len());
     let mut index = 0;
@@ -401,7 +432,13 @@ fn expand_nested(
 
             if next == Some('{') {
                 let (token, after) = read_braced(&characters, index + 2)?;
-                output.push_str(&expand_token(&token, options, scope, environment)?);
+                output.push_str(&expand_token(
+                    &token,
+                    options,
+                    scope,
+                    environment,
+                    depth + 1,
+                )?);
                 index = after;
                 continue;
             }
@@ -433,29 +470,37 @@ fn expand_nested(
 
 /// Expands one braced reference.
 ///
-/// A token with no nested `${…}` is handed to `neotales-env` exactly as it was written, so its
-/// grammar and its `${NAME:=text}` store-as-written behavior are unchanged. Only a token that
-/// contains a nested reference is split here, at the first operator outside any nested braces,
-/// which is the split the upstream substring search gets wrong. The operand is expanded through
-/// [`expand_nested`], so a reference inside it may nest again.
+/// A token with no genuine nested `${…}` is handed to `neotales-env` exactly as it was written, so
+/// its grammar and its `${NAME:=text}` store-as-written behavior are unchanged. That includes a
+/// token whose braces are literal (`${A:-bar{z}}`) and one whose reference is escaped
+/// (`${A:-\${B}}`); neither is a nested reference, and both keep `neotales-env`'s operator search.
+/// Such a token also cannot make `neotales-env` recurse, because recursion there starts at an
+/// unescaped `${…}` and the token has none.
+///
+/// Only a token that holds a genuine nested reference is split here, at the first operator outside
+/// any nested braces, which is the split the upstream substring search gets wrong. The operand is
+/// expanded through [`expand_nested`], so a reference inside it may nest again, up to
+/// [`DotenvFile::MAX_NESTING_DEPTH`]. A token with a nested reference but no operator outside it is
+/// malformed: any operator `neotales-env` could find is inside the braces, so the name it would
+/// read contains a `{` and it rejects the token before expanding anything.
 fn expand_token(
     token: &str,
     options: &mut ExpandOptions<'_>,
     scope: &RefCell<BTreeMap<String, String>>,
     environment: Option<&BTreeMap<String, String>>,
+    depth: usize,
 ) -> Result<String, SourceError> {
-    if !token.contains('{') {
+    if depth > DotenvFile::MAX_NESTING_DEPTH {
+        return Err(SourceError::invalid());
+    }
+    if !holds_nested_reference(token) {
         return options
             .expand(&format!("${{{token}}}"))
             .map_err(|_| SourceError::invalid());
     }
 
     let Some((name, operator, operand)) = split_token(token) else {
-        // No operator outside a nested reference: the token is a bare name or is malformed, and
-        // `neotales-env` already reports either case correctly.
-        return options
-            .expand(&format!("${{{token}}}"))
-            .map_err(|_| SourceError::invalid());
+        return Err(SourceError::invalid());
     };
 
     let value = expand_name(&name, scope, environment)?;
@@ -464,20 +509,95 @@ fn expand_token(
     }
 
     match operator {
-        Operator::Default => expand_nested(&operand, options, scope, environment),
+        Operator::Default => expand_nested(&operand, options, scope, environment, depth),
         Operator::Assign => {
             // Store the operand as written, as `neotales-env` does for an assign, and read it back
             // through the same scope. A successful store makes the stored text the result.
             store_local(scope, &name, &operand);
             let stored = lookup_local(scope, environment, &name).unwrap_or_default();
             if stored.is_empty() {
-                expand_nested(&operand, options, scope, environment)
+                expand_nested(&operand, options, scope, environment, depth)
             } else {
                 Ok(stored)
             }
         }
         Operator::Required => Err(SourceError::invalid()),
     }
+}
+
+/// Reports whether `token` holds a reference the expansion grammar treats as nested.
+///
+/// A `$` followed by `{` opens a nested reference unless the grammar escapes it: `\$` and `$$` are
+/// one literal `$`, so `${A:-\${B}}` and `${A:-$${B}}` hold no nested reference. A literal `{` on
+/// its own is not a reference either. The scan walks left to right and consumes an escape pair
+/// whole, which is how the expander itself reads the text.
+fn holds_nested_reference(token: &str) -> bool {
+    let mut characters = token.char_indices();
+    while let Some((_, character)) = characters.next() {
+        match character {
+            '\\' if characters
+                .clone()
+                .next()
+                .is_some_and(|(_, next)| next == '$') =>
+            {
+                characters.next();
+            }
+            '$' => match characters.clone().next().map(|(_, next)| next) {
+                Some('$') => {
+                    characters.next();
+                }
+                Some('{') => return true,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Reports whether every reference in `value` nests within [`DotenvFile::MAX_NESTING_DEPTH`].
+///
+/// The scan is iterative, so it cannot overflow the stack however deep the input is, and it stops
+/// as soon as the bound is passed. It mirrors the brace reading the expanders use: every `{` inside
+/// a reference keeps that reference open, while `\$` and `$$` are literal dollars that open
+/// nothing. A `{` outside a reference opens a literal brace, tracked so the matching `}` is not
+/// mistaken for the end of a reference.
+fn within_nesting_bound(value: &str) -> bool {
+    // One entry per open brace: `true` when that brace opened a `${…}` reference.
+    let mut braces: Vec<bool> = Vec::new();
+    let mut references = 0_usize;
+    let mut characters = value.char_indices();
+    while let Some((_, character)) = characters.next() {
+        match character {
+            '\\' => {
+                if characters
+                    .clone()
+                    .next()
+                    .is_some_and(|(_, next)| next == '$')
+                {
+                    characters.next();
+                }
+            }
+            '$' => match characters.clone().next().map(|(_, next)| next) {
+                Some('$') => {
+                    characters.next();
+                }
+                Some('{') => {
+                    characters.next();
+                    braces.push(true);
+                    references += 1;
+                    if references > DotenvFile::MAX_NESTING_DEPTH {
+                        return false;
+                    }
+                }
+                _ => {}
+            },
+            '{' => braces.push(false),
+            '}' => references -= usize::from(braces.pop() == Some(true)),
+            _ => {}
+        }
+    }
+    true
 }
 
 /// Splits a token at its first `:` that is not inside a nested `${…}`.
