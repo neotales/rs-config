@@ -4,3 +4,6 @@
 # the repository is what makes the scheduled `cargo audit` and `cargo deny`
 # runs describe the same graph a release builds from.
 **/*.rs.bk
+
+# `eng/release/stage_gate.py` is Python. Bytecode is not part of the repository.
+__pycache__/

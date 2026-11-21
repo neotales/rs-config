@@ -84,6 +84,27 @@ jobs:
             exit 1
           fi
 
+  release-gate:
+    name: release gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: release-gate
+
+      # The release workflow runs this same script immediately before an upload.
+      # Here it runs with the failure injection: a gate that has never been seen
+      # rejecting anything is not a gate. The injection stages the registry
+      # without the core and with a drifted core version, and checks that
+      # packaging the provider fails against both, then exercises the three
+      # verdicts the publish job's checksum decision can return. Nothing is
+      # uploaded and no token is read.
+      - name: Package the group against a staged registry
+        run: python3 eng/release/stage_gate.py gate --self-test
+
   msrv:
     name: msrv
     runs-on: ubuntu-latest
