@@ -15,10 +15,13 @@ name: release
 #
 # What remains is the proof that is real: the group packages together, in
 # dependency order, against a staged registry built from the committed
-# `Cargo.lock`; each member's verified artifact is recorded once by SHA-256; and
-# crates.io is asked, read-only, whether it already holds those exact bytes. The
-# recorded digest is what a human compares with the artifact downloaded after a
-# manual publish. See RELEASE.md, section "Publishing by hand".
+# `Cargo.lock`; the gate writes one machine-readable record naming the commit,
+# the clean flag, and each verified artifact's SHA-256 and manifest digest; and
+# preflight consumes exactly that record, refusing a stale commit, a changed
+# manifest, a missing artifact or an artifact whose bytes no longer match before
+# it asks crates.io anything. The recorded digest is what a human compares with
+# the artifact downloaded after a manual publish. See RELEASE.md, section
+# "Publishing by hand".
 #
 # This repository is a virtual workspace: the crates live in top-level
 # directories, `config/` is `neotales-config`, and `keepass/` is
@@ -79,14 +82,23 @@ jobs:
       # A tag run repeats this gate in the verify job, immediately before the
       # digest is recorded, so it is not run twice here. A manual run never
       # reaches that job; this is the pre-flight that tells you the tree
-      # packages and the version can be released before you tag it.
+      # packages and the version can be released before you tag it. The gate
+      # writes the record preflight consumes; the path is outside the checkout
+      # so writing it cannot change the tree the record describes.
       - name: Verify the provider packages against the candidate core
         if: github.event_name == 'workflow_dispatch'
-        run: python3 eng/release/stage_gate.py gate
+        run: |
+          set -euo pipefail
+          python3 eng/release/stage_gate.py gate \
+            --record "$RUNNER_TEMP/gate-record.json"
 
-      - name: Report the registry state and the manual plan
+      - name: Consume the gate record and report the manual plan
         if: github.event_name == 'workflow_dispatch'
-        run: python3 eng/release/stage_gate.py preflight --artifact-dir target/package
+        run: |
+          set -euo pipefail
+          python3 eng/release/stage_gate.py preflight \
+            --record "$RUNNER_TEMP/gate-record.json" \
+            --artifact-dir target/package
 
   version:
     name: tag matches the crate version
@@ -163,27 +175,32 @@ jobs:
           cache-key: release-verify
 
       # The gate packages and verifies the group against a staged registry
-      # built from Cargo.lock. It reproduces the artifacts a release would
-      # publish and proves the provider resolves against the candidate core.
+      # built from Cargo.lock, then writes the durable record of the captured
+      # digests. Nothing publishes.
       - name: Verify the group packages as a group
-        run: python3 eng/release/stage_gate.py gate
+        run: |
+          set -euo pipefail
+          python3 eng/release/stage_gate.py gate \
+            --record "$RUNNER_TEMP/gate-record.json"
 
-      # Records each artifact's SHA-256 once, compares those captured digests
-      # with crates.io (read-only), fails on a version published at different
-      # bytes, a matching-but-yanked version, or an inconsistent group, and
-      # prints the manual plan for a member that is not published yet.
-      - name: Record the verified digests and the manual plan
+      # Consumes exactly the record above. It validates the recorded commit,
+      # clean flag, manifests and artifact bytes before any registry query, so a
+      # modified or missing artifact stops the run before a plan exists. It does
+      # not repackage, and it does not re-hash an artifact into a new reference.
+      # The registry comparison is read-only.
+      - name: Consume the gate record and the manual plan
         env:
           PLAN: ${{ runner.temp }}/preflight.txt
         run: |
           set -euo pipefail
           python3 eng/release/stage_gate.py preflight \
+            --record "$RUNNER_TEMP/gate-record.json" \
             --artifact-dir target/package | tee "$PLAN"
 
       # The digests above are only meaningful for this exact tag, from an
-      # unmodified tree. The gate writes only to the ignored target directory,
-      # and the capture check inside preflight already refuses an artifact that
-      # changed after it was read.
+      # unmodified tree. The gate record already rejects a stale commit, a dirty
+      # checkout, a changed manifest and a changed artifact; this is the second,
+      # independent check that the job is looking at the tag it claims.
       - name: Prove the checkout is the tag, unmodified
         env:
           TAG: ${{ github.ref_name }}

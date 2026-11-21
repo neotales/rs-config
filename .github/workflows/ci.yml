@@ -100,10 +100,12 @@ jobs:
       # anything is not a gate. The injection stages the registry without the
       # core and with a drifted core version, rejects a provider or core
       # published at different bytes or matching-but-yanked with zero pending
-      # publishes, proves both packages are byte-stable, proves a mutated
-      # manifest, source file or artifact cannot change the recorded digest,
-      # proves the program has no publishing path or token read, and runs the
-      # gate from outside the repository root. Nothing is published.
+      # publishes, proves both packages are byte-stable, writes the gate record,
+      # then mutates a copy of the artifact, removes one, edits a manifest, moves
+      # the commit and changes a source file between gate and preflight and
+      # requires each to be refused before a plan; proves the program has no
+      # publishing path or token read; and runs the gate from outside the
+      # repository root. Nothing is published.
       - name: Package the group against a staged registry
         run: python3 eng/release/stage_gate.py gate --self-test
 

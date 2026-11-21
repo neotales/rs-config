@@ -17,9 +17,17 @@ that endpoint states that the crates.io restrictions it lists are not
 exhaustive. Either mistake spends an immutable version, so neither is automated.
 
 What remains is the part that can be proven locally: the group packages
-together, in dependency order, and the digest of each verified artifact is
-recorded once and compared with crates.io. A human publishes, then compares the
-artifact downloaded from crates.io with that recorded digest.
+together, in dependency order, and `gate` writes one machine-readable record of
+the commit, the clean flag, and each verified artifact's SHA-256 and manifest
+digest. `preflight` consumes exactly that record, refuses a stale commit, a
+changed manifest, a missing artifact or an artifact whose bytes no longer match
+before it asks crates.io anything, and then reports the registry state of those
+recorded digests. `system-admin` publishes; the published artifact is downloaded
+and compared with the recorded digest.
+
+That comparison happens after the upload. It proves what crates.io serves hashes
+to the verified digest; it does not prove that `cargo publish` sent those exact
+bytes, because it repackages the checkout. Nothing here claims that guarantee.
 
 ## What runs on a tag
 
@@ -27,9 +35,9 @@ artifact downloaded from crates.io with that recorded digest.
 
 | Job | What it does |
 | --- | --- |
-| `check` | Format, clippy, tests, a `cargo publish --dry-run` packaging smoke test, and (on `workflow_dispatch` only) the gate and preflight. |
+| `check` | Format, clippy, tests, a `cargo publish --dry-run` packaging smoke test, and (on `workflow_dispatch` only) the gate and preflight, with the gate record passed from one to the other. |
 | `version` | Requires the tag to equal `v` plus the version in every member manifest. |
-| `verify` | Runs the gate, records each artifact's SHA-256, asks crates.io (read-only) about those captured digests, proves the tree is the tag and unmodified, and states that nothing was published. |
+| `verify` | Runs the gate, which writes the record of each artifact's SHA-256 and manifest digest; preflight consumes exactly that record and rejects a stale commit, changed manifest, missing artifact or changed bytes before any plan; then it asks crates.io (read-only) about the recorded digests, proves the tree is the tag and unmodified, and states that nothing was published. |
 
 The `verify` job has `permissions: contents: read`. It does not request
 `id-token`, and there is no `CARGO_REGISTRY_TOKEN` secret in this repository.
@@ -37,7 +45,11 @@ A green run means **the tag is verified, not released**. The job summary carries
 the recorded digests and the manual plan.
 
 A `workflow_dispatch` run never reaches `verify`; it runs the checks, the gate
-and preflight, and publishes nothing.
+and preflight, with the record passed between them, and publishes nothing.
+
+`preflight` does not run `cargo package` and does not repackage the tree. It
+reports on the artifacts the gate built and recorded; it does not produce a
+fresh build to compare with the registry.
 
 ## The version rule
 
@@ -55,15 +67,18 @@ first.
 Bump the version, commit, push, then tag that commit:
 
 ```sh
-python3 eng/release/stage_gate.py gate
-python3 eng/release/stage_gate.py preflight --artifact-dir target/package
+python3 eng/release/stage_gate.py gate \
+  --record target/package/gate-record.json
+python3 eng/release/stage_gate.py preflight \
+  --record target/package/gate-record.json \
+  --artifact-dir target/package
 git tag v0.3.1
 git push origin dev
 git push origin v0.3.1
 ```
 
 The tag run verifies the tag. It does not publish it. The first version of a new
-crate is uploaded by hand and has no tag-driven history at all; see
+crate is uploaded by `system-admin` and has no tag-driven history at all; see
 [First publish of a new crate](#first-publish-of-a-new-crate).
 
 ## The gate that runs before anything is published
@@ -86,7 +101,15 @@ would be unpublishable at that version and the tag would be spent.
 3. runs `cargo package` for each member in dependency order — the same build
    `cargo publish` performs — adding each member's packaged `.crate` to the
    staging registry before the next member is resolved;
-4. fails the run if any member does not package and verify.
+4. fails the run if any member does not package and verify;
+5. writes the durable record at `--record` (default
+   `target/package/gate-record.json`): the commit, whether that checkout was
+   clean, and for every member the artifact filename, its SHA-256, the manifest
+   path, and the manifest's SHA-256. The record is written atomically, so a
+   half-written record is never mistaken for a capture. Keep the record under the
+   ignored `target/` directory or outside the checkout: preflight refuses a
+   working tree with untracked changes, and an untracked record inside the tree
+   counts as one.
 
 After staging, the verification is offline. `crates.io` is replaced by the
 staging directory, so resolution cannot reach the network and a verification
@@ -94,28 +117,40 @@ failure is a packaging failure, not a flake. Staging itself needs the network
 once, through `cargo fetch --locked`, which is also what a cold runner needs
 before it can build anything.
 
-What the gate proves: every member packages, and every member builds from the
-exact `.crate` bytes the gate staged, against the members before it. What it does
-not prove: that crates.io will accept the upload, that the bytes `cargo publish`
-repackages later are identical, or that a published artifact matches. The first
-is why a human publishes; the last two are why the recorded digest is compared
-with the artifact downloaded from crates.io afterwards.
+What the gate proves: every member packages, every member builds from the exact
+`.crate` bytes the gate staged against the members before it, and the record
+describes that commit, that clean checkout and those bytes. `cargo package`
+stamps the commit and dirty flag into `.cargo_vcs_info.json` inside each
+`.crate`; the gate refuses an artifact whose stamp is not the commit it is about
+to record, so the record's commit is bound to the bytes as well as to the
+checkout. What it does not prove: that crates.io will accept the upload, that
+the bytes `cargo publish` repackages later are identical, or that a published
+artifact matches. The first is why `system-admin` publishes; the last two are why
+the recorded digest is compared with the artifact downloaded from crates.io
+afterwards.
 
 ### The gate artifact is not the upload artifact
 
 `cargo publish` repackages into its own target directory and uploads that
 tarball. Nothing in this repository claims that the gate artifact is the upload
-artifact. The gate artifact is the reference: its SHA-256 is recorded once by
-`preflight`, and the same digest is what you check against the file crates.io
+artifact. The gate artifact is the reference: `gate` records its SHA-256 once in
+the record, and that same digest is what you check against the file crates.io
 serves after a manual upload. This is a comparison after the fact, not a check
 that bound the bytes that were sent, and the documentation says so plainly.
 
-`preflight` reads each artifact exactly once. Every later decision — the
-registry comparison, the second read of the registry, and the final plan — uses
-that recorded digest, never the file again. If the artifact changes after it was
-read (a second `cargo package`, a manual edit, another process), the run fails
-with `the verified artifact changed after it was read` rather than reporting on
-bytes it did not verify.
+`preflight` consumes the record rather than re-deriving it. Before it asks
+crates.io anything or prints a plan, it checks:
+
+- the record's commit equals `HEAD`;
+- the record was written from a clean checkout, and the checkout is still clean;
+- each member's manifest is the one the record names, at the recorded version and
+  manifest digest;
+- each artifact exists and still hashes to the digest in the record.
+
+Any mismatch is a failure. The new hash is never adopted as the reference: a
+modified artifact, a missing artifact, a stale commit or a changed manifest all
+stop the run before a plan. `preflight` does not run `cargo package` and does not
+repackage the tree.
 
 ### Both members are checked, and nothing is published
 
@@ -133,45 +168,63 @@ prints each member's state, then the group verdict:
 `different`, `yanked`, and an inconsistent group exit non-zero and print
 `Nothing was published`. `absent` exits zero with the manual plan: the member
 names in dependency order, the `cargo publish` command to run, and the digest to
-compare afterwards. The registry is read a second time with the same captured
+compare afterwards. The registry is read a second time with the same recorded
 digests; if it changed while the plan was built, the run fails and asks you to
-re-run rather than acting on a stale plan.
+re-run rather than acting on a stale plan. The record and the artifacts are
+re-checked at the end too: a file that moved while the registry was queried is
+not silently reported as verified.
+
+A record failure happens before any registry query and before any plan. The
+messages name what moved: `the gate record is stale`, `the checkout has changed
+since the gate ran`, `manifest changed after the gate verified it`,
+`artifact changed after the gate verified it`, or `is missing`. Re-run the gate
+from a clean checkout of the tag; do not publish bytes whose digest was not
+recorded by that gate run.
 
 ## Publishing by hand
 
-This is the only publishing path. It is a human operation. The crates.io token
-(`CARGO_REGISTRY_TOKEN`) is supplied by `system-admin`; this repository, its
-workflow and `stage_gate.py` never read it. Do not place the token in the
-repository, on a command line, or in shell history.
+This is the only publishing path. `system-admin` alone handles the credentials
+and performs the upload: it is the only persona that reads
+`CARGO_REGISTRY_TOKEN`. No other persona reads, exports, or types the token, and
+it never enters this repository, the workflow, `stage_gate.py`, a command line,
+or shell history.
 
-Do all of this from a **clean checkout of the tag**, not from a working tree and
-not from a branch:
+The operator prepares the evidence and performs the download-and-compare check.
+`system-admin` uploads. Do all of it from a **clean checkout of the tag**, not
+from a working tree and not from a branch:
 
 ```sh
 git status --porcelain          # must be empty
 git describe --tags --exact-match HEAD   # must print the tag
 ```
 
-1. Verify the group and record the digests. The `verify` job prints them; run it
-   locally if you need to:
+1. Produce the record, with no credential. The `verify` job does this and prints
+   the digests; run it locally if you need to:
 
    ```sh
-   python3 eng/release/stage_gate.py gate
-   python3 eng/release/stage_gate.py preflight --artifact-dir target/package
+   python3 eng/release/stage_gate.py gate \
+     --record target/package/gate-record.json
+   python3 eng/release/stage_gate.py preflight \
+     --record target/package/gate-record.json \
+     --artifact-dir target/package
    ```
 
-   `preflight` must exit zero. Write down the two `sha256` lines. If it exits
-   non-zero because of `different`, `yanked` or an inconsistent group, stop:
+   `preflight` must exit zero. Write down the two `sha256` lines, or hand the
+   record to `system-admin`. If it exits non-zero because of `different`,
+   `yanked`, an inconsistent group, a stale commit or a changed document, stop:
    the version cannot be published as verified.
 
-2. Publish the core first, with the token in the environment:
+2. Hand the **core** upload to `system-admin`. The core goes first:
 
    ```sh
    cargo publish --package neotales-config --locked
    ```
 
-3. Compare the published bytes with the recorded digest **before** touching the
-   provider:
+   `system-admin` supplies the token. The operator does not run this with a token
+   in their own environment.
+
+3. Immediately download the core and compare it with the record, **before any
+   provider upload**:
 
    ```sh
    name=neotales-config
@@ -183,17 +236,23 @@ git describe --tags --exact-match HEAD   # must print the tag
      --manifest config/Cargo.toml --artifact-dir /tmp
    ```
 
-   The `sha256sum` must equal the recorded digest for the core, and `state`
-   points at the downloaded copy, so it confirms the registry's checksum
-   describes that same file: it must print `identical`. If either check does
-   not match, stop: the version is spent. Do not publish the provider, do not
-   retry, and do not yank-and-republish. Bump the version in every manifest,
-   commit, tag, and start again.
+   The `sha256sum` must equal the core digest in the record, and `state` must
+   print `identical` (it points at the downloaded copy, so it confirms the
+   registry's checksum describes that same file).
 
-4. Publish the provider and compare it the same way:
+   **If either check differs, or the download fails, STOP.** Do not upload the
+   provider. Do not retry the core, and do not yank-and-republish. The version is
+   spent: bump the version in every manifest, commit, tag, and start again.
+
+4. Only after step 3 passes, hand the **provider** upload to `system-admin`:
 
    ```sh
    cargo publish --package neotales-config-keepass --locked
+   ```
+
+5. Download the provider and compare it with its recorded digest:
+
+   ```sh
    name=neotales-config-keepass
    version=$(python3 -c 'import tomllib;print(tomllib.load(open("keepass/Cargo.toml","rb"))["package"]["version"])')
    curl -fsSL -o "/tmp/$name-$version.crate" \
@@ -203,17 +262,27 @@ git describe --tags --exact-match HEAD   # must print the tag
      --manifest keepass/Cargo.toml --artifact-dir /tmp
    ```
 
-5. Confirm the end state. Each downloaded `sha256sum` must equal its recorded
-   digest, and each `state` must print `identical`. If you also want CI's view,
-   run `preflight`; it re-packages the tree, so it compares a fresh build with
-   the registry:
+   The provider's `sha256sum` must equal its recorded digest and `state` must
+   print `identical`. If it does not, stop: do not retry the version.
+
+6. Confirm the end state. Both downloaded `sha256sum` values must equal their
+   recorded digests, and both `state` calls must print `identical`. If you also
+   want CI's view, consume the same record again:
 
    ```sh
-   python3 eng/release/stage_gate.py preflight --artifact-dir target/package
+   python3 eng/release/stage_gate.py preflight \
+     --record target/package/gate-record.json \
+     --artifact-dir target/package
    ```
 
-   Both members must report `identical` and the plan must say
-   `nothing to publish`.
+   `preflight` reads the recorded artifacts and does not repackage, so it does
+   not compare a fresh build with the registry. Both members must report
+   `identical` and the plan must say `nothing to publish`.
+
+The download comparison happens after the upload. It proves that the bytes
+crates.io serves hash to the recorded digest; it does not prove that the bytes
+`cargo publish` sent were those bytes. That guarantee is not available locally,
+and nothing here claims it.
 
 If `cargo publish` reports an error after crates.io accepted the upload (its own
 confirmation wait can time out), do not re-run it. Ask the registry: `state`
@@ -229,46 +298,62 @@ manual, like every other upload now.
 The first upload goes through `/home/dev/work/rs/publish.sh <dir>`. That script
 lives beside this folder, in `~/work/rs`, and is deliberately not copied into the
 crate repository: it is how the first version of every crate is uploaded, not
-part of any one crate. The operator runs it; it never becomes part of CI, and
-this repository never holds its token.
+part of any one crate. `system-admin` alone runs it and handles the credential;
+no other persona reads the token. It never becomes part of CI, and this
+repository never holds its token.
 
 1. Set `version = "0.0.0-alpha.0"` in every member manifest that is being
    published together, commit it, and leave the working tree clean.
-2. Run the gate and preflight before uploading anything:
+2. Produce the record before uploading anything, with no credential:
 
    ```sh
-   python3 eng/release/stage_gate.py gate
-   python3 eng/release/stage_gate.py preflight --artifact-dir target/package
+   python3 eng/release/stage_gate.py gate \
+     --record target/package/gate-record.json
+   python3 eng/release/stage_gate.py preflight \
+     --record target/package/gate-record.json \
+     --artifact-dir target/package
    ```
 
    The gate stages the candidate core locally and verifies the provider against
-   it, and uploads nothing. `preflight` requires both versions to be absent (or
-   already present at the recorded digest). A version spent at other bytes, or a
-   matching-but-yanked version, stops here. If the gate fails, the manual upload
-   would fail at the provider with the core already published, which is the
-   state this repository's gate exists to avoid.
-
-3. Publish the dependency first. This repository's core is `config/`:
+   it, and uploads nothing. `preflight` consumes that record and requires both
+   versions to be absent (or already present at the recorded digest). A version
+   spent at other bytes, a matching-but-yanked version, a stale commit or a
+   changed artifact stops here. Hand the record to `system-admin`. Skipping this
+   check risks discovering that the provider cannot be packaged only after the
+   core is already published, which is the state this repository's gate exists
+   to avoid.
+3. `system-admin` uploads the **core** first. This repository's core is
+   `config/`:
 
    ```sh
    ~/work/rs/publish.sh config
+   ```
+
+4. Immediately download the core and compare it with the record **before the
+   provider is uploaded**, as in
+   [Publishing by hand](#publishing-by-hand) step 3. If the download fails or the
+   digest differs, **STOP**: do not upload the provider, do not retry, and do not
+   yank-and-republish. The version is spent; bump it in every manifest, commit,
+   tag, and start again.
+5. Only after the core comparison passes, `system-admin` uploads the provider:
+
+   ```sh
    ~/work/rs/publish.sh keepass
    ```
 
    The provider's upload fails if `neotales-config` 0.0.0-alpha.0 is not on
    crates.io yet: `cargo publish` verifies the package against the registry, not
    against this checkout. That is the intended order.
-
-4. Compare the downloaded artifacts with the gate digests, as in
-   [Publishing by hand](#publishing-by-hand). `publish.sh` does not compare
-   anything; the comparison is what tells you the upload matched the verified
-   artifact.
+6. Download the provider and compare it with its recorded digest, as in
+   [Publishing by hand](#publishing-by-hand) step 4. `publish.sh` does not
+   compare anything; the download-and-compare is what tells you the served bytes
+   match the record. It does not prove which bytes `publish.sh` sent.
 
 If the crate name is taken on crates.io by someone else, stop. A rename is a
 different repository setup, not a flag.
 
 **Do not enable Trusted Publishing Only for these crates.** The only publisher is
-a human with a token. A trusted publisher configured earlier is unused by
+`system-admin` with a token. A trusted publisher configured earlier is unused by
 `release.yml`, which no longer requests a token; enabling the restriction would
 break manual publishing without replacing it with anything proven.
 
@@ -288,10 +373,13 @@ part of a crate.
    with it. The lockfile is what the scheduled audit checks.
 2. Push the commit.
 3. Tag it `vX.Y.Z` and push the tag.
-4. The workflow runs the checks and the gate, records the digests, reports the
-   registry state and stops. Nothing is published.
-5. Publish by hand, in dependency order, from a clean checkout of the tag, and
-   compare each downloaded artifact with its recorded digest.
+4. The workflow runs the checks and the gate; the gate writes the record;
+   preflight consumes exactly that record, refuses a stale commit or a changed
+   manifest/artifact, reports the registry state and stops. Nothing is published.
+5. Hand the record to `system-admin`, who uploads from a clean checkout of the
+   tag in dependency order. After the **core** upload, download it and compare
+   its digest with the record **before** the provider is uploaded; stop on a
+   mismatch. Then upload the provider and compare it the same way.
 
 ## When the core published and the provider did not
 
@@ -301,22 +389,29 @@ replaced, so the core must not be published twice and the provider must not be
 versioned on its own: the version rule requires both manifests to carry the
 tag's version.
 
-Ask the registry first:
+Ask the registry first, consuming the record from the tag. If you do not have a
+record from a clean checkout of that tag, produce one before asking:
 
 ```sh
-python3 eng/release/stage_gate.py preflight --artifact-dir target/package
+python3 eng/release/stage_gate.py gate \
+  --record target/package/gate-record.json
+python3 eng/release/stage_gate.py preflight \
+  --record target/package/gate-record.json \
+  --artifact-dir target/package
 ```
 
 | Registry answer for the recorded digest | What to do |
 | --- | --- |
-| the core is `identical`, the provider is `absent` | This is the expected half-published state. Check out the same tag cleanly, publish the provider by hand, and compare the downloaded artifact with the recorded digest. Do not re-publish the core. |
+| the core is `identical`, the provider is `absent` | This is the expected half-published state. Check out the same tag cleanly, confirm the core's downloaded digest matches the record, then hand the provider upload to `system-admin`. Download the provider and compare it with the record. Do not re-publish the core. |
 | both are `identical` | The release is complete. Nothing to do. |
 | any member is `different` | That version is spent. Bump the version in every manifest and tag again. Do not retry, and do not try to replace the version. |
 | a member is `yanked` with a matching digest | The version is not installable and cannot be published again. Unyank it on crates.io if that was our yank; otherwise bump the version. |
 | the provider is published while the core is absent | The registry state is inconsistent with a group release. Investigate the crate's version history and bump the group version. Do not publish around it. |
 
 Re-running the workflow from the tag re-verifies and re-reports. It cannot
-publish and cannot change the state above.
+publish and cannot change the state above. If the record is stale, a manifest
+changed, an artifact is missing or an artifact's bytes moved, preflight fails
+before it prints this table; re-run the gate from the clean tag checkout.
 
 ## What is not allowed
 
@@ -328,11 +423,23 @@ publish and cannot change the state above.
   added. Both can run untrusted code with publishing credentials in scope.
 - No publishing from a branch or a dirty working tree. The tag and a clean
   checkout are what make the recorded digests describe something nameable.
+  `gate` records the commit and clean flag; `preflight` refuses a record that no
+  longer matches either.
 - No republishing a version. crates.io rejects it. If a publish fails after the
   upload was accepted, bump the version; never retry the same version.
+- No re-hashing a changed artifact and treating the new hash as the reference.
+  A modified, missing or unreviewed artifact fails preflight. The gate record is
+  the only authority for the digest.
 - No claim that a manual upload matched without comparing the artifact
   downloaded from crates.io with the recorded digest. A version string alone
-  cannot tell a completed release from a different tarball.
+  cannot tell a completed release from a different tarball, and the comparison is
+  after the fact: it does not prove which bytes `cargo publish` sent.
+- No provider upload before the core has been downloaded and its digest compared
+  with the record. A core mismatch stops the release with the provider
+  unpublished.
+- No credential outside `system-admin`. The operator does not read, export or
+  type `CARGO_REGISTRY_TOKEN`, and it never enters the repository, the workflow,
+  a command line or shell history.
 - No publishing a member after preflight blocked. The plan carries zero pending
   publishes when any member is mismatched, yanked, or inconsistent.
 - No deleting a target directory the gate did not create, and no following a
@@ -345,8 +452,11 @@ The gate stages into a unique `target/release-gate-*` directory it creates with
 `mkdtemp` and owns. It refuses a `CARGO_TARGET_DIR` (or a `target/`) that
 traverses a symbolic link, and every removal checks that the path is a real child
 of the directory this run created. It never deletes a fixed `release-gate` name
-that another checkout could have placed behind a symlink. There is no separate
-publish work directory to leak, because there is no publish step.
+that another checkout could have placed behind a symlink. The gate record is
+written with a temporary file and an atomic rename, so a failed write cannot
+leave a partial capture. `preflight` is read-only: it writes no artifact, runs no
+packaging command, and there is no separate publish work directory to leak
+because there is no publish step.
 
 `cargo package -p neotales-config-keepass` on its own still fails until the core
 is published. That failure is expected and is not a gate. Use the gate, which
@@ -362,15 +472,25 @@ stages the core it needs.
 | Gate: `no matching package named neotales-config` | The staged registry lost the core. That is a bug in the gate, not a release problem, and it is the state this gate exists to make impossible. The `release-gate` job in `ci.yml` injects this failure on every run. |
 | Gate: `cannot read https://index.crates.io/...` | The index was unreachable while staging the locked dependencies. Nothing was published; re-run the job. |
 | Gate: `... is a symbolic link` | `CARGO_TARGET_DIR` or `target/` traverses a symlink. The gate refuses to create or delete through it. Point the target at a real directory. Nothing was published. |
+| Gate: `was packaged from commit ..., but ... is at ...` | HEAD moved while the gate was packaging, or the artifact came from another commit. Nothing was published; re-run the gate on a commit that is not moving. |
+| Gate: `has no .../.cargo_vcs_info.json` | `cargo package` did not stamp the commit, usually because the run is not in a Git checkout. The record cannot bind the bytes to a commit; run the gate from the real release checkout. |
 | Verify: `the checkout has changes` or `HEAD is ... not ...` | The tag job is not running on a clean checkout of that exact tag. The recorded digests would describe something else. Nothing was published; investigate the checkout, not the release. |
 | Preflight: `different` | crates.io already holds this version at other bytes. It exits non-zero. A version cannot be replaced: bump the patch version and tag again. Do not retry the tag. |
 | Preflight: `yanked` | crates.io holds this exact artifact but the version is yanked. It exits non-zero. Unyank it on crates.io if that was our yank; otherwise bump the version. A yanked version cannot be published again. |
 | Preflight: provider exists while the core does not | The registry state is inconsistent with a group release. Nothing was published. Do not publish around it; investigate the versions and bump the group version. |
-| Preflight: `the verified artifact changed after it was read` | Something rewrote `target/package/*.crate` after the digest was recorded. The recorded digest no longer describes the file. Re-run the gate from a clean tag checkout; do not publish bytes whose digest was not verified. |
+| Preflight: `... is missing. The gate recorded ...` | The record names an artifact that `--artifact-dir` does not contain. Point preflight at the directory the gate wrote, or re-run the gate from the clean tag checkout. Do not publish from a missing artifact. |
+| Preflight: `... hashes to ..., but the gate recorded ...` | An artifact changed after the gate wrote the record. The recorded digest no longer describes that file. Preflight refuses it rather than adopting the new hash. Re-run the gate from a clean tag checkout. |
+| Preflight: `manifest changed after the gate verified it` | A member manifest differs from the one the gate recorded. The artifact does not describe this tree. Re-run the gate from the checkout being released. |
+| Preflight: `the gate record is stale` | The record's commit is not `HEAD`. The record came from another commit. Re-run the gate on the commit being released; do not reuse the old record. |
+| Preflight: `the gate record was written from a dirty checkout` | The gate ran with uncommitted changes. Its record cannot describe a tag. Commit or discard the changes and re-run the gate. |
+| Preflight: `the checkout has changed since the gate ran` | The working tree moved after the record was written. Commit or discard the changes and re-run the gate. |
+| Preflight: `... is missing. preflight consumes the gate record` | No record was passed, or the path is wrong. Run the gate with `--record` and pass that path to preflight. |
+| Preflight: `the gate record ... changed while preflight was running` | The record was rewritten during the run. Nothing was published; re-run the gate and preflight. |
 | Preflight: `crates.io changed while preflight was running` | The registry state moved between two reads. Nothing was published. Re-run the workflow for a consistent plan. |
-| `verify` is green but the crate is not on crates.io | This is the intended state: the tag is verified, not released. Publish by hand, then compare the downloaded artifact with the recorded digest. |
-| Manual publish: `cargo publish` rejects the token | The token is missing or invalid, or the crate is in Trusted Publishing Only mode. Do not enable that mode while publishing by hand; ask `system-admin` for a token that can publish. |
+| `verify` is green but the crate is not on crates.io | This is the intended state: the tag is verified, not released. Hand the record to `system-admin`, then compare the downloaded artifact with the recorded digest. |
+| Manual publish: `cargo publish` rejects the token | The token is missing or invalid, or the crate is in Trusted Publishing Only mode. `system-admin` alone handles the token. Do not enable that mode while publishing by hand; ask `system-admin` for a token that can publish. |
 | Manual publish: `cargo publish` reports an error but the artifact downloads and matches | crates.io accepted the upload and cargo failed later, usually its own confirmation wait. Investigate the cargo error; do not upload the version again. |
-| Manual publish: the downloaded digest differs from the recorded digest | The version is spent. Do not publish the next member, do not retry, and do not yank-and-republish. Bump the version in every manifest and tag again. |
-| Manual publish: `cargo publish` fails for the provider because the core is missing | The core was not published, or its version does not match the provider's dependency. Publish the core first, from the same tag. |
+| Manual publish: the core's downloaded digest differs from the record | The version is spent. **Do not upload the provider**, do not retry, and do not yank-and-republish. Bump the version in every manifest and tag again. |
+| Manual publish: the provider's downloaded digest differs from the record | The version is spent. Do not retry and do not yank-and-republish. Bump the version in every manifest and tag again. |
+| Manual publish: `cargo publish` fails for the provider because the core is missing | The core was not published, or its version does not match the provider's dependency. Publish the core first, from the same tag, and compare its downloaded digest before the provider. |
 | `cargo package -p neotales-config-keepass` fails locally | The core version is not on crates.io, and Cargo resolves the path dependency from the registry while preparing the package, even with `--no-verify`. Run `python3 eng/release/stage_gate.py gate` instead; it stages the core and verifies the provider. |
