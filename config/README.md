@@ -28,16 +28,16 @@ cargo add neotales-config@0.0.0-alpha.0 --features ini
 cargo add neotales-config@0.0.0-alpha.0 --features reload
 ```
 
-The `dotenv`, `json`, `json5`, `jsonc`, `toml`, and `yaml` features add their parser crate.
-`args`, `environment`, and `ini` add code and no crate, because the INI parser is part of this
-crate.
+The `dotenv`, `json`, `json5`, `jsonc`, `toml`, and `yaml` features add their parser crate;
+`dotenv` also adds `neotales-env` for interpolation. `args`, `environment`, and `ini` add code and
+no crate, because the INI parser is part of this crate.
 
 | Feature | Provider | Reads | Adds |
 | --- | --- | --- | --- |
 | none | `Builder::memory`, `Builder::source` | caller-supplied values and closures | nothing |
 | `args` | `Builder::arguments`, `Arguments` | already-tokenized `OsString` argv | code |
 | `environment` | `Builder::environment`, `Environment` | the process environment or fixed pairs | code |
-| `dotenv` | `Builder::dotenv_file`, `DotenvFile` | one caller-supplied dotenv file | `neotales-dotenv` |
+| `dotenv` | `Builder::dotenv_file`, `DotenvFile` | one caller-supplied dotenv file | `neotales-dotenv`, `neotales-env` |
 | `json` | `Builder::json_file`, `JsonFile` | RFC 8259 JSON | `serde_json` |
 | `json5` | `Builder::json5_file`, `Json5File` | JSON5 1.0 | `json5` |
 | `jsonc` | `Builder::jsonc_file`, `JsoncFile` | JSON plus comments | `jsonc-parser` |
@@ -47,7 +47,7 @@ crate.
 | `reload` | `Builder::build_reloadable`, `Reload` | source reload, subscriptions, opt-in polling | code, no thread until started |
 
 The formats are separate on purpose. Enabling `json` compiles no YAML parser, and a build with no
-feature has no parser in its dependency graph.
+feature has no parser or dotenv expander in its dependency graph.
 
 ## What you can do ⚙️
 
@@ -227,14 +227,20 @@ a map reject the source. An empty key, an empty path component, an empty separat
 name or value are invalid. An error names the source and the kind, never a variable or a value.
 
 **Read a dotenv file.** The `dotenv` feature adds `DotenvFile`, which parses one caller-supplied
-file with `neotales-dotenv`. It never interpolates a value and never changes the process
-environment.
+file with `neotales-dotenv` and expands `${NAME}` references with `neotales-env`. The file is read,
+and interpolation falls back to the process environment unless `with_environment` supplies a fixed
+set. The process environment is never written.
 
 ```rust,no_run
 use neotales_config::{Builder, DotenvFile};
 
 let config = Builder::new()
-    .dotenv_file("dotenv", DotenvFile::new("config/.env").prefix("APP_"))
+    .dotenv_file(
+        "dotenv",
+        DotenvFile::new("config/.env")
+            .prefix("APP_")
+            .with_environment([("HOME", "example-home")]),
+    )
     .build()
     .expect("configuration builds");
 
@@ -242,14 +248,50 @@ assert_eq!(config.get::<String>("http.port").unwrap(), "8080");
 ```
 
 `export KEY=value`, unquoted, single-quoted, double-quoted, and backtick values are accepted, and
-every value stays a string. A line whose first non-whitespace character is `#` is a comment; an
-unquoted `#` ends a value and starts an inline comment, while a `#` inside a quoted value stays
-literal. With a file line `APP_http.port=8080`, the builder's default delimiter `.` produces the
-nested map `http` then `port`; an explicit `separator` overrides it, and `flat()` keeps the key as
-one component. A later assignment wins at the same path. An invalid line, an empty key, an empty
-path component, a non-UTF-8 file, and a scalar/map conflict reject the source. The error carries
-no path, line, or value. Reading the file is the only I/O; the process environment is never read
-or written.
+every value stays a string after expansion. A line whose first non-whitespace character is `#` is a
+comment; an unquoted `#` ends a value and starts an inline comment, while a `#` inside a quoted
+value stays literal. With a file line `APP_http.port=8080`, the builder's default delimiter `.`
+produces the nested map `http` then `port`; an explicit `separator` overrides it, and `flat()` keeps
+the key as one component. A later assignment wins at the same path. An invalid line, an empty key,
+an empty path component, a non-UTF-8 file, and a scalar/map conflict reject the source. The error
+carries no path, line, variable, or value.
+
+Interpolation is on by default and is sequential:
+
+- An unquoted or double-quoted value expands. A single-quoted or backtick value stays literal.
+- The lookup checks the document first: an earlier assignment's expanded value, including one the
+  prefix does not select and one written by `${NAME:=text}`, then the process environment.
+- `${NAME:=text}` stores `text` in a per-load local scope for later assignments. It never writes
+  the process environment or the fixed set supplied by `with_environment`, and the local scope is
+  not part of the snapshot. A reload starts a new local scope, so the write does not survive it.
+- A duplicate assignment sees the earlier expanded value before it replaces it. A forward
+  reference reads the environment, because the later assignment has not run yet.
+- A missing or empty name expands to an empty string. `${NAME:-text}` and `${NAME:text}` use
+  `text`, and a reference inside that default is expanded; `${NAME:?text}` rejects the source and
+  discards `text`, so it never reaches an error.
+- An unbraced `$NAME` takes the longest run of letters, digits, and underscores, so `$HOMEtail`
+  is the name `HOMEtail`; use `${HOME}tail` before another name character.
+- A looked-up value is inserted as-is. A `$` inside an earlier assignment's value or an environment
+  value is not expanded a second time.
+- `$$` and `\$` produce a literal `$`. Command substitution (`$(...)`), Windows `%NAME%`
+  references, arithmetic, word splitting, globbing, positional parameters, and arrays are not
+  evaluated. `${NAME-default}` without the colon is malformed; a colon introduces only the
+  default, assign, or required form above.
+- Expansion runs in source order for every assignment, selected or not. A malformed reference in
+  any assignment rejects the whole source, even when the prefix selects none of it.
+- `DotenvFile::interpolate(false)` keeps every value literal and does not read the process
+  environment. It is the opt-out for a document that is not a template.
+
+The parser runs before expansion, so it removes the outer quotes and decodes its own escapes
+first. In an unquoted or double-quoted value, `\$` is the reliable way to write a literal `$`; a
+single-quoted value is not expanded at all, and a backtick value is not expanded even though the
+parser decodes its escapes like a double-quoted value's. `${NAME:=text}` stores the operand as
+written: `neotales-env` does not expand a `$` inside that operand before storing it, so use a
+literal default when a later assignment reads the stored name.
+
+`with_environment` replaces the process lookup with a fixed set for a test or a captured
+environment. It affects interpolation only; it never selects an assignment, and a repeated name
+keeps its last value. The accepted grammar is a subset of a shell, not Bash evaluation.
 
 **Read a configuration file.** Each format is a separate opt-in feature and an explicit
 constructor. Nothing is inferred from a file extension, and no source tries the next format when

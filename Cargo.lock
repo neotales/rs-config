@@ -304,6 +304,8 @@ checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
  "hashbrown",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -373,6 +375,7 @@ dependencies = [
  "json5",
  "jsonc-parser",
  "neotales-dotenv",
+ "neotales-env",
  "saphyr",
  "saphyr-parser",
  "serde",
@@ -395,6 +398,15 @@ name = "neotales-dotenv"
 version = "0.0.0-alpha.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe55aeab0be49413e2b9fbbdbbf7e75fcfb139e8d6225e051e3f79a08cc8b54f"
+dependencies = [
+ "indexmap",
+]
+
+[[package]]
+name = "neotales-env"
+version = "0.0.0-alpha.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b95e8aef48ce602ad0bedfbfff775233487e1a56367a00897bcca67f47d0c45b"
 dependencies = [
  "indexmap",
 ]

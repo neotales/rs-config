@@ -165,8 +165,9 @@ impl Builder {
     /// Registers a dotenv file source. Requires the `dotenv` feature.
     ///
     /// The provider receives the builder's final delimiter as its default key separator, whatever
-    /// order this method and [`Builder::delimiter`] are called in. The file is read at build and
-    /// the process environment is never changed. See [`crate::DotenvFile`].
+    /// order this method and [`Builder::delimiter`] are called in. The file is read at build, and
+    /// `${NAME}` expansion reads earlier assignments and then the process environment. No call
+    /// writes the process environment. See [`crate::DotenvFile`].
     #[cfg(feature = "dotenv")]
     #[must_use]
     pub fn dotenv_file(self, name: impl Into<String>, file: crate::DotenvFile) -> Self {

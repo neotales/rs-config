@@ -14,8 +14,9 @@
 
 use neotales_config::{Builder, SourceError, Value};
 
-const ABSENT: [&str; 8] = [
+const ABSENT: [&str; 9] = [
     "neotales-dotenv",
+    "neotales-env",
     "serde_json",
     "json5",
     "jsonc-parser",

@@ -36,7 +36,7 @@
 //! | --- | --- | --- |
 //! | `args` | `Arguments` | none |
 //! | `environment` | `Environment` | none |
-//! | `dotenv` | `DotenvFile` | `neotales-dotenv` |
+//! | `dotenv` | `DotenvFile` | `neotales-dotenv`, `neotales-env` |
 //! | `json` | `JsonFile` | `serde_json` |
 //! | `json5` | `Json5File` | `json5` |
 //! | `jsonc` | `JsoncFile` | `jsonc-parser` |
@@ -46,7 +46,9 @@
 //! | `reload` | `Builder::build_reloadable`, `Reload` | none |
 //!
 //! No feature is on by default. A provider value stays a string unless it is an argv boolean or a
-//! format value, and no provider writes to the process environment. The dedicated provider builder
+//! format value, and no provider writes to the process environment. A dotenv value may use
+//! `${NAME}` references; they expand in source order from earlier assignments and then the process
+//! environment, and the process environment is never written. The dedicated provider builder
 //! methods apply the builder's final delimiter as the default key separator, whatever order the
 //! registration and the delimiter were given in. File formats do not take a separator: their
 //! structure is already expressed by the document, so every key is used literally.

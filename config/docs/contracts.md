@@ -36,7 +36,7 @@ Each provider is opt-in and is a normal `Source`:
 | --- | --- | --- |
 | `args` | `Arguments` | none |
 | `environment` | `Environment` | none |
-| `dotenv` | `DotenvFile` | `neotales-dotenv` |
+| `dotenv` | `DotenvFile` | `neotales-dotenv`, `neotales-env` |
 | `json` | `JsonFile` | `serde_json` |
 | `json5` | `Json5File` | `json5` |
 | `jsonc` | `JsoncFile` | `jsonc-parser` |
@@ -44,8 +44,9 @@ Each provider is opt-in and is a normal `Source`:
 | `yaml` | `YamlFile` | `saphyr`, `saphyr-parser` |
 | `ini` | `IniFile` | none |
 
-No provider is compiled into the default build. Every parser is an optional dependency of exactly
-one feature; `cargo tree --no-default-features` shows no parser.
+No provider is compiled into the default build. Every parser and the dotenv expander are optional
+dependencies of exactly one feature; `cargo tree --no-default-features` shows no parser and no
+expander.
 
 ### Key mapping
 
@@ -64,7 +65,8 @@ one feature; `cargo tree --no-default-features` shows no parser.
 
 ### Values and collisions
 
-- Environment and dotenv values stay strings. A numeric or boolean spelling is never parsed.
+- Environment and dotenv values stay strings, including after dotenv expansion. A numeric or
+  boolean spelling is never parsed.
 - Arguments values are strings for `--key=value` and booleans for `--key` and `--no-key`.
 - A repeated scalar path keeps the later entry: argv order for `Arguments`, file order for
   `DotenvFile`, and original-name order for `Environment` (selected names are sorted first, so a
@@ -100,12 +102,48 @@ automatic uppercase or lowercase.
 
 ### Dotenv
 
-`DotenvFile` reads one caller-supplied path once, at build, with `neotales-dotenv`. `export`,
-unquoted, single-quoted, double-quoted, and backtick values are accepted. A line whose first
-non-whitespace character is `#` is a comment; an unquoted `#` ends a value and starts an inline
-comment, while a `#` inside a quoted value stays literal. There is no interpolation and no
-environment mutation. A read failure is `SourceError::Unavailable`; an invalid document, invalid
-UTF-8, an empty key, or a mapping conflict is `SourceError::Invalid`.
+`DotenvFile` reads one caller-supplied path once per load, at build, with `neotales-dotenv`.
+`export`, unquoted, single-quoted, double-quoted, and backtick values are accepted. A line whose
+first non-whitespace character is `#` is a comment; an unquoted `#` ends a value and starts an
+inline comment, while a `#` inside a quoted value stays literal. A read failure is
+`SourceError::Unavailable`; an invalid document, invalid UTF-8, an empty key, a mapping conflict,
+or an expansion failure is `SourceError::Invalid`.
+
+Interpolation is on by default and uses `neotales-env`:
+
+- Unquoted and double-quoted values expand; single-quoted and backtick values do not.
+- Expansion is sequential in source order. The per-load local scope starts empty. Every
+  assignment's expanded value enters the scope under its exact source key before the prefix
+  selects it, so an unselected assignment is visible to a later one.
+- A lookup checks the local scope first, then the process environment. `with_environment` replaces
+  the process lookup with a fixed set for a test or a captured environment. A repeated fixed name
+  keeps its last value, and fixed names are matched exactly, including on Windows, where a process
+  lookup is case-insensitive. It never selects an assignment.
+- `${NAME:=text}` writes only the local scope. The process environment and the fixed set are never
+  written. The operand is stored as written: `neotales-env` does not expand a `$` inside it before
+  storage, so a later assignment sees the operand literally.
+- Accepted forms are `$NAME`, `${NAME}`, `${NAME:-text}`, `${NAME:text}`, `${NAME:=text}`, and
+  `${NAME:?text}`. An unbraced `$NAME` takes the longest run of letters, digits, and underscores,
+  so `${NAME}` is required before another name character. A looked-up value is inserted as-is; a
+  `$` inside it is not expanded a second time. A missing or empty name is empty; the
+  default forms supply `text`, which may itself contain references that `neotales-env` expands;
+  the required form rejects the source. `$$` and `\$` are a literal `$`. Command substitution, Windows `%NAME%` references, arithmetic,
+  word splitting, globbing, positional parameters, arrays, and other Bash parameter forms are not
+  evaluated. `${NAME-default}` without the colon is malformed;
+  a colon introduces only the default, assign, or required form. A process name whose value is not
+  Unicode is treated as unset.
+- A duplicate assignment sees the earlier expanded value and then replaces it. A forward reference
+  reads the environment, not a later assignment.
+- Expansion runs for every assignment, selected or not. A malformed reference in an unselected
+  assignment rejects the whole source.
+- No expansion error is forwarded. In particular, the `text` after `:?` is discarded and never
+  reaches an error or a `Debug` output.
+- `DotenvFile::interpolate(false)` keeps the parser's decoded values unchanged and does not read
+  the process environment.
+- The dotenv parser decodes its own escapes before expansion. A single-quoted value is not
+  expanded; a backtick value is not expanded even though its escapes are decoded like a
+  double-quoted value's. `\$` survives parsing and is the reliable literal-`$` escape in an
+  unquoted or double-quoted value.
 
 ### File formats
 
@@ -354,7 +392,7 @@ text. `Error::source()` is always `None`, so no nested error can reintroduce tex
 | Core with every provider feature off | `tests/providers_off.rs` |
 | Argument switches, collisions, and errors | `tests/arguments.rs` |
 | Environment mapping, case, duplicates, and collisions | `tests/environment.rs` |
-| Dotenv parsing, mapping, and errors | `tests/dotenv.rs` |
+| Dotenv parsing, interpolation, mapping, and errors | `tests/dotenv.rs` |
 | JSON, JSON5, JSONC, TOML, YAML, and INI end-to-end reads | `tests/formats.rs`, `src/source/*.rs` |
 | Each file source rereads its path | `tests/formats.rs` |
 | Duplicate-name rules per dialect | `src/source/json.rs`, `src/source/json5.rs`, `src/source/jsonc.rs`, `src/source/toml_file.rs`, `src/source/yaml.rs`, `src/source/ini.rs` |
