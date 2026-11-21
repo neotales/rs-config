@@ -9,6 +9,11 @@
 //! `invalid_value`, and `invalid_length`; any of those can contain a value or a secret. Only the
 //! fixed labels declared in this module are stored, so an error can name a shape but never echo
 //! text.
+//!
+//! A [`Cursor`] also records the path from the value handed to serde down to the node that failed.
+//! A type mismatch can therefore attribute the source that wrote the failing leaf instead of the
+//! source of the map that happens to contain it. That path is internal: it never becomes part of
+//! an error's text.
 
 use std::{collections::btree_map, fmt, slice};
 
@@ -39,19 +44,31 @@ const REQUIRED_FIELDS: &str = "a map with every required field";
 const DUPLICATE_FIELDS: &str = "a map without duplicate fields";
 
 /// A failed deserialization, reduced to a label from this module.
-#[derive(Clone, Copy, Debug)]
+///
+/// It also carries the path from the value handed to serde down to the node that failed, when the
+/// accessors could see it. The path is used for source attribution and is never printed.
+#[derive(Clone, Debug)]
 pub(crate) struct DeError {
     expected: &'static str,
+    leaf: Option<Vec<String>>,
 }
 
 impl DeError {
-    const fn mismatch(expected: &'static str) -> Self {
-        Self { expected }
+    fn mismatch(expected: &'static str) -> Self {
+        Self {
+            expected,
+            leaf: None,
+        }
     }
 
     /// The description of the expected shape, never the value that was found.
     pub(crate) const fn expected(&self) -> &'static str {
         self.expected
+    }
+
+    /// The failing node's path relative to the value handed to serde, when it is known.
+    pub(crate) fn leaf(&self) -> Option<&[String]> {
+        self.leaf.as_deref()
     }
 }
 
@@ -99,54 +116,28 @@ impl de::Error for DeError {
     }
 }
 
-/// The node as an exact integer. A float counts only when it has no fraction.
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::float_cmp,
-    reason = "an exact round trip is the check; the range guard keeps each cast meaningful"
-)]
-fn float_to_integer(number: f64) -> Option<i128> {
-    if !number.is_finite() || number.fract() != 0.0 {
-        return None;
-    }
-    if number < i64::MIN as f64 || number > u64::MAX as f64 {
-        return None;
-    }
-    let integer = number as i128;
-    // Reject a float that no longer round-trips, such as 2^63 rendered imprecisely.
-    (integer as f64 == number).then_some(integer)
+/// Prepends the component a failed child was reached through.
+///
+/// The innermost accessor records the component it descended through, and every enclosing
+/// accessor prepends its own. The result is the path from the value handed to serde to the node
+/// that failed, however deep the failure is.
+fn with_component(mut error: DeError, component: &str) -> DeError {
+    error
+        .leaf
+        .get_or_insert_default()
+        .insert(0, component.to_owned());
+    error
 }
 
-fn exact_integer(node: Node<'_>) -> Option<i128> {
+/// The node as an exact integer.
+///
+/// Only [`Value::Integer`] qualifies. A float is never read as an integer, whatever its fraction,
+/// and a string is never parsed.
+const fn exact_integer(node: Node<'_>) -> Option<i128> {
     match node {
         Node::Value(Value::Integer(number)) => Some(*number),
-        Node::Value(Value::Float(number)) => float_to_integer(*number),
         _ => None,
     }
-}
-
-/// Converts an integer to `f64` only when the float denotes exactly the same number.
-///
-/// An `f64` carries 53 significant bits. An integer that needs more is representable only when
-/// every bit the mantissa drops is zero, so `2^60` converts exactly and `u64::MAX` does not. A
-/// plain `as f64` followed by `as i128` would accept `i128::MAX`, because that back-cast
-/// saturates onto the value it rounded away from.
-fn integer_into_f64(number: i128) -> Option<f64> {
-    let magnitude = number.unsigned_abs();
-    let significant_bits = magnitude.bit_width();
-    if significant_bits > f64::MANTISSA_DIGITS {
-        let dropped = significant_bits - f64::MANTISSA_DIGITS;
-        if magnitude & ((1_u128 << dropped) - 1) != 0 {
-            return None;
-        }
-    }
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "the check above proves the conversion is exact"
-    )]
-    let converted = number as f64;
-    converted.is_finite().then_some(converted)
 }
 
 /// Narrows to `f32` only when the value survives unchanged.
@@ -170,13 +161,30 @@ fn visit_integer<'de, V: Visitor<'de>>(number: i128, visitor: V) -> Result<V::Va
     }
 }
 
-impl<'de> Deserializer<'de> for Node<'de> {
+/// One node being deserialized, with the path from the value handed to serde.
+///
+/// The path is pushed and popped by the accessors as they descend, so a failure anywhere below the
+/// root records the full path to the node that failed.
+pub(crate) struct Cursor<'a, 'p> {
+    node: Node<'a>,
+    path: &'p mut Vec<String>,
+}
+
+impl<'a, 'p> Cursor<'a, 'p> {
+    /// Wraps one node, recording descent into `path`.
+    pub(crate) const fn new(node: Node<'a>, path: &'p mut Vec<String>) -> Self {
+        Self { node, path }
+    }
+}
+
+impl<'de> Deserializer<'de> for Cursor<'de, '_> {
     type Error = DeError;
 
     fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
-        match self {
-            Self::Str(text) => visitor.visit_borrowed_str(text),
-            Self::Value(value) => match value {
+        let Self { node, path } = self;
+        match node {
+            Node::Str(text) => visitor.visit_borrowed_str(text),
+            Node::Value(value) => match value {
                 Value::Null => visitor.visit_unit(),
                 Value::Bool(flag) => visitor.visit_bool(*flag),
                 Value::Integer(number) => visit_integer(*number, visitor),
@@ -184,25 +192,28 @@ impl<'de> Deserializer<'de> for Node<'de> {
                 Value::String(text) => visitor.visit_borrowed_str(text),
                 Value::Array(items) => visitor.visit_seq(SequenceAccess {
                     items: items.iter(),
+                    index: 0,
+                    path,
                 }),
                 Value::Map(map) => visitor.visit_map(MapAccessor {
                     entries: map.iter(),
-                    value: None,
+                    pending: None,
+                    path,
                 }),
             },
         }
     }
 
     fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
-        match self {
-            Self::Value(Value::Null) => visitor.visit_none(),
+        match self.node {
+            Node::Value(Value::Null) => visitor.visit_none(),
             _ => visitor.visit_some(self),
         }
     }
 
     fn deserialize_unit<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
-        match self {
-            Self::Value(Value::Null) => visitor.visit_unit(),
+        match self.node {
+            Node::Value(Value::Null) => visitor.visit_unit(),
             _ => Err(DeError::mismatch("null")),
         }
     }
@@ -224,14 +235,14 @@ impl<'de> Deserializer<'de> for Node<'de> {
     }
 
     fn deserialize_bool<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
-        match self {
-            Self::Value(Value::Bool(flag)) => visitor.visit_bool(*flag),
+        match self.node {
+            Node::Value(Value::Bool(flag)) => visitor.visit_bool(*flag),
             _ => Err(DeError::mismatch("a boolean")),
         }
     }
 
     fn deserialize_i8<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
-        exact_integer(self)
+        exact_integer(self.node)
             .and_then(|number| i8::try_from(number).ok())
             .map_or_else(
                 || Err(DeError::mismatch("a signed 8-bit integer")),
@@ -240,7 +251,7 @@ impl<'de> Deserializer<'de> for Node<'de> {
     }
 
     fn deserialize_i16<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
-        exact_integer(self)
+        exact_integer(self.node)
             .and_then(|number| i16::try_from(number).ok())
             .map_or_else(
                 || Err(DeError::mismatch("a signed 16-bit integer")),
@@ -249,7 +260,7 @@ impl<'de> Deserializer<'de> for Node<'de> {
     }
 
     fn deserialize_i32<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
-        exact_integer(self)
+        exact_integer(self.node)
             .and_then(|number| i32::try_from(number).ok())
             .map_or_else(
                 || Err(DeError::mismatch("a signed 32-bit integer")),
@@ -258,7 +269,7 @@ impl<'de> Deserializer<'de> for Node<'de> {
     }
 
     fn deserialize_i64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
-        exact_integer(self)
+        exact_integer(self.node)
             .and_then(|number| i64::try_from(number).ok())
             .map_or_else(
                 || Err(DeError::mismatch("a signed 64-bit integer")),
@@ -267,14 +278,14 @@ impl<'de> Deserializer<'de> for Node<'de> {
     }
 
     fn deserialize_i128<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
-        exact_integer(self).map_or_else(
+        exact_integer(self.node).map_or_else(
             || Err(DeError::mismatch("a signed integer")),
             |value| visitor.visit_i128(value),
         )
     }
 
     fn deserialize_u8<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
-        exact_integer(self)
+        exact_integer(self.node)
             .and_then(|number| u8::try_from(number).ok())
             .map_or_else(
                 || Err(DeError::mismatch("an unsigned 8-bit integer")),
@@ -283,7 +294,7 @@ impl<'de> Deserializer<'de> for Node<'de> {
     }
 
     fn deserialize_u16<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
-        exact_integer(self)
+        exact_integer(self.node)
             .and_then(|number| u16::try_from(number).ok())
             .map_or_else(
                 || Err(DeError::mismatch("an unsigned 16-bit integer")),
@@ -292,7 +303,7 @@ impl<'de> Deserializer<'de> for Node<'de> {
     }
 
     fn deserialize_u32<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
-        exact_integer(self)
+        exact_integer(self.node)
             .and_then(|number| u32::try_from(number).ok())
             .map_or_else(
                 || Err(DeError::mismatch("an unsigned 32-bit integer")),
@@ -301,7 +312,7 @@ impl<'de> Deserializer<'de> for Node<'de> {
     }
 
     fn deserialize_u64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
-        exact_integer(self)
+        exact_integer(self.node)
             .and_then(|number| u64::try_from(number).ok())
             .map_or_else(
                 || Err(DeError::mismatch("an unsigned 64-bit integer")),
@@ -310,7 +321,7 @@ impl<'de> Deserializer<'de> for Node<'de> {
     }
 
     fn deserialize_u128<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
-        exact_integer(self)
+        exact_integer(self.node)
             .and_then(|number| u128::try_from(number).ok())
             .map_or_else(
                 || Err(DeError::mismatch("an unsigned integer")),
@@ -319,9 +330,8 @@ impl<'de> Deserializer<'de> for Node<'de> {
     }
 
     fn deserialize_f32<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
-        let number = match self {
-            Self::Value(Value::Float(number)) => exact_f32(*number),
-            Self::Value(Value::Integer(number)) => integer_into_f64(*number).and_then(exact_f32),
+        let number = match self.node {
+            Node::Value(Value::Float(number)) => exact_f32(*number),
             _ => None,
         };
         number.map_or_else(
@@ -335,19 +345,10 @@ impl<'de> Deserializer<'de> for Node<'de> {
     }
 
     fn deserialize_f64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
-        let number = match self {
-            Self::Value(Value::Float(number)) => Some(*number),
-            Self::Value(Value::Integer(number)) => integer_into_f64(*number),
-            _ => None,
-        };
-        number.map_or_else(
-            || {
-                Err(DeError::mismatch(
-                    "a 64-bit float that holds the value exactly",
-                ))
-            },
-            |value| visitor.visit_f64(value),
-        )
+        match self.node {
+            Node::Value(Value::Float(number)) => visitor.visit_f64(*number),
+            _ => Err(DeError::mismatch("a 64-bit float")),
+        }
     }
 
     fn deserialize_char<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
@@ -355,10 +356,10 @@ impl<'de> Deserializer<'de> for Node<'de> {
     }
 
     fn deserialize_str<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
-        match self {
-            Self::Str(text) => visitor.visit_borrowed_str(text),
-            Self::Value(Value::String(text)) => visitor.visit_borrowed_str(text),
-            Self::Value(_) => Err(DeError::mismatch("a string")),
+        match self.node {
+            Node::Str(text) => visitor.visit_borrowed_str(text),
+            Node::Value(Value::String(text)) => visitor.visit_borrowed_str(text),
+            Node::Value(_) => Err(DeError::mismatch("a string")),
         }
     }
 
@@ -375,9 +376,11 @@ impl<'de> Deserializer<'de> for Node<'de> {
     }
 
     fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
-        match self {
-            Self::Value(Value::Array(items)) => visitor.visit_seq(SequenceAccess {
+        match self.node {
+            Node::Value(Value::Array(items)) => visitor.visit_seq(SequenceAccess {
                 items: items.iter(),
+                index: 0,
+                path: self.path,
             }),
             _ => Err(DeError::mismatch("an array")),
         }
@@ -388,7 +391,7 @@ impl<'de> Deserializer<'de> for Node<'de> {
         len: usize,
         visitor: V,
     ) -> Result<V::Value, DeError> {
-        fixed_sequence(self, len, visitor)
+        fixed_sequence(self.node, len, visitor, self.path)
     }
 
     fn deserialize_tuple_struct<V: Visitor<'de>>(
@@ -397,14 +400,15 @@ impl<'de> Deserializer<'de> for Node<'de> {
         len: usize,
         visitor: V,
     ) -> Result<V::Value, DeError> {
-        fixed_sequence(self, len, visitor)
+        fixed_sequence(self.node, len, visitor, self.path)
     }
 
     fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
-        match self {
-            Self::Value(Value::Map(map)) => visitor.visit_map(MapAccessor {
+        match self.node {
+            Node::Value(Value::Map(map)) => visitor.visit_map(MapAccessor {
                 entries: map.iter(),
-                value: None,
+                pending: None,
+                path: self.path,
             }),
             _ => Err(DeError::mismatch("a map")),
         }
@@ -416,10 +420,11 @@ impl<'de> Deserializer<'de> for Node<'de> {
         _fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, DeError> {
-        match self {
-            Self::Value(Value::Map(map)) => visitor.visit_map(MapAccessor {
+        match self.node {
+            Node::Value(Value::Map(map)) => visitor.visit_map(MapAccessor {
                 entries: map.iter(),
-                value: None,
+                pending: None,
+                path: self.path,
             }),
             _ => Err(DeError::mismatch("a map")),
         }
@@ -431,25 +436,29 @@ impl<'de> Deserializer<'de> for Node<'de> {
         _variants: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, DeError> {
-        match self {
-            Self::Str(variant) => visitor.visit_enum(EnumAccessor {
+        let Self { node, path } = self;
+        match node {
+            Node::Str(variant) => visitor.visit_enum(EnumAccessor {
                 variant,
                 value: None,
+                path,
             }),
-            Self::Value(Value::String(variant)) => visitor.visit_enum(EnumAccessor {
+            Node::Value(Value::String(variant)) => visitor.visit_enum(EnumAccessor {
                 variant,
                 value: None,
+                path,
             }),
-            Self::Value(Value::Map(map)) if map.len() == 1 => {
+            Node::Value(Value::Map(map)) if map.len() == 1 => {
                 let Some((variant, value)) = map.iter().next() else {
                     return Err(DeError::mismatch("an enum"));
                 };
                 visitor.visit_enum(EnumAccessor {
                     variant,
                     value: Some(value),
+                    path,
                 })
             }
-            Self::Value(_) => Err(DeError::mismatch("an enum")),
+            Node::Value(_) => Err(DeError::mismatch("an enum")),
         }
     }
 
@@ -466,36 +475,49 @@ impl<'de> Deserializer<'de> for Node<'de> {
 ///
 /// Serde's tuple visitor reads `len` elements and ignores the rest, so a length check here is the
 /// only place an extra or missing element is caught.
-fn fixed_sequence<'de, V: Visitor<'de>>(
+fn fixed_sequence<'de, 'p, V: Visitor<'de>>(
     node: Node<'de>,
     len: usize,
     visitor: V,
+    path: &'p mut Vec<String>,
 ) -> Result<V::Value, DeError> {
     match node {
         Node::Value(Value::Array(items)) if items.len() == len => {
             visitor.visit_seq(SequenceAccess {
                 items: items.iter(),
+                index: 0,
+                path,
             })
         }
         _ => Err(DeError::mismatch(EXPECTED_LENGTH)),
     }
 }
 
-struct SequenceAccess<'de> {
+struct SequenceAccess<'de, 'p> {
     items: slice::Iter<'de, Value>,
+    index: usize,
+    path: &'p mut Vec<String>,
 }
 
-impl<'de> SeqAccess<'de> for SequenceAccess<'de> {
+impl<'de> SeqAccess<'de> for SequenceAccess<'de, '_> {
     type Error = DeError;
 
     fn next_element_seed<T: DeserializeSeed<'de>>(
         &mut self,
         seed: T,
     ) -> Result<Option<T::Value>, DeError> {
-        match self.items.next() {
-            Some(item) => seed.deserialize(Node::Value(item)).map(Some),
-            None => Ok(None),
-        }
+        let Some(item) = self.items.next() else {
+            return Ok(None);
+        };
+        let index = self.index;
+        self.index += 1;
+        let component = index.to_string();
+        self.path.push(component.clone());
+        let outcome = seed.deserialize(Cursor::new(Node::Value(item), &mut *self.path));
+        self.path.pop();
+        outcome
+            .map(Some)
+            .map_err(|error| with_component(error, &component))
     }
 
     fn size_hint(&self) -> Option<usize> {
@@ -503,12 +525,13 @@ impl<'de> SeqAccess<'de> for SequenceAccess<'de> {
     }
 }
 
-struct MapAccessor<'de> {
+struct MapAccessor<'de, 'p> {
     entries: btree_map::Iter<'de, String, Value>,
-    value: Option<&'de Value>,
+    pending: Option<(&'de String, &'de Value)>,
+    path: &'p mut Vec<String>,
 }
 
-impl<'de> MapAccess<'de> for MapAccessor<'de> {
+impl<'de> MapAccess<'de> for MapAccessor<'de, '_> {
     type Error = DeError;
 
     fn next_key_seed<K: DeserializeSeed<'de>>(
@@ -517,45 +540,61 @@ impl<'de> MapAccess<'de> for MapAccessor<'de> {
     ) -> Result<Option<K::Value>, DeError> {
         match self.entries.next() {
             Some((key, value)) => {
-                self.value = Some(value);
-                seed.deserialize(Node::Str(key)).map(Some)
+                self.pending = Some((key, value));
+                seed.deserialize(Cursor::new(Node::Str(key), &mut *self.path))
+                    .map(Some)
             }
             None => Ok(None),
         }
     }
 
     fn next_value_seed<V: DeserializeSeed<'de>>(&mut self, seed: V) -> Result<V::Value, DeError> {
-        let value = self
-            .value
+        let (key, value) = self
+            .pending
             .take()
             .ok_or_else(|| DeError::mismatch("a map value"))?;
-        seed.deserialize(Node::Value(value))
+        self.path.push(key.clone());
+        let outcome = seed.deserialize(Cursor::new(Node::Value(value), &mut *self.path));
+        self.path.pop();
+        outcome.map_err(|error| with_component(error, key))
     }
 }
 
-struct EnumAccessor<'de> {
+struct EnumAccessor<'de, 'p> {
     variant: &'de str,
     value: Option<&'de Value>,
+    path: &'p mut Vec<String>,
 }
 
-impl<'de> de::EnumAccess<'de> for EnumAccessor<'de> {
+#[allow(
+    clippy::elidable_lifetime_names,
+    reason = "the associated `Variant` type names the path borrow, so `'p` must stay in scope"
+)]
+impl<'de, 'p> de::EnumAccess<'de> for EnumAccessor<'de, 'p> {
     type Error = DeError;
-    type Variant = VariantAccessor<'de>;
+    type Variant = VariantAccessor<'de, 'p>;
 
     fn variant_seed<K: DeserializeSeed<'de>>(
         self,
         seed: K,
     ) -> Result<(K::Value, Self::Variant), DeError> {
-        let variant = seed.deserialize(Node::Str(self.variant))?;
-        Ok((variant, VariantAccessor { value: self.value }))
+        let variant = seed.deserialize(Cursor::new(Node::Str(self.variant), self.path))?;
+        Ok((
+            variant,
+            VariantAccessor {
+                value: self.value,
+                path: self.path,
+            },
+        ))
     }
 }
 
-struct VariantAccessor<'de> {
+struct VariantAccessor<'de, 'p> {
     value: Option<&'de Value>,
+    path: &'p mut Vec<String>,
 }
 
-impl<'de> VariantAccess<'de> for VariantAccessor<'de> {
+impl<'de> VariantAccess<'de> for VariantAccessor<'de, '_> {
     type Error = DeError;
 
     fn unit_variant(self) -> Result<(), DeError> {
@@ -567,14 +606,14 @@ impl<'de> VariantAccess<'de> for VariantAccessor<'de> {
 
     fn newtype_variant_seed<T: DeserializeSeed<'de>>(self, seed: T) -> Result<T::Value, DeError> {
         match self.value {
-            Some(value) => seed.deserialize(Node::Value(value)),
+            Some(value) => seed.deserialize(Cursor::new(Node::Value(value), self.path)),
             None => Err(DeError::mismatch("a newtype variant")),
         }
     }
 
     fn tuple_variant<V: Visitor<'de>>(self, len: usize, visitor: V) -> Result<V::Value, DeError> {
         match self.value {
-            Some(value) => fixed_sequence(Node::Value(value), len, visitor),
+            Some(value) => fixed_sequence(Node::Value(value), len, visitor, self.path),
             None => Err(DeError::mismatch("a tuple variant")),
         }
     }
@@ -587,7 +626,8 @@ impl<'de> VariantAccess<'de> for VariantAccessor<'de> {
         match self.value {
             Some(Value::Map(map)) => visitor.visit_map(MapAccessor {
                 entries: map.iter(),
-                value: None,
+                pending: None,
+                path: self.path,
             }),
             _ => Err(DeError::mismatch("a struct variant")),
         }
@@ -598,17 +638,23 @@ impl<'de> VariantAccess<'de> for VariantAccessor<'de> {
 mod tests {
     use serde::Deserialize;
 
-    use super::Node;
+    use super::{Cursor, Node};
     use crate::value::Value;
 
     fn read<T: for<'de> Deserialize<'de>>(value: &Value) -> Result<T, super::DeError> {
-        T::deserialize(Node::Value(value))
+        let mut leaf = Vec::new();
+        T::deserialize(Cursor::new(Node::Value(value), &mut leaf))
     }
 
     #[derive(Debug, Deserialize, PartialEq)]
     struct Http {
         port: u16,
         host: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct Service {
+        http: Http,
     }
 
     #[derive(Debug, Deserialize, PartialEq)]
@@ -697,39 +743,60 @@ mod tests {
     }
 
     #[test]
-    fn accepts_lossless_numeric_fits_and_rejects_the_rest() {
+    fn an_integer_reads_only_as_an_integer() {
         assert_eq!(read::<u64>(&Value::from(7_i64)).unwrap(), 7);
-        let as_float = read::<f64>(&Value::from(8080_i64)).unwrap();
-        assert!((as_float - 8080.0).abs() < f64::EPSILON);
-        assert_eq!(read::<i64>(&Value::Float(8080.0)).unwrap(), 8080);
-        assert!(read::<i64>(&Value::Float(8080.5)).is_err());
+        assert_eq!(read::<i64>(&Value::from(8080_i64)).unwrap(), 8080);
         assert!(read::<i64>(&Value::from("8080")).is_err());
         assert!(read::<u64>(&Value::from(-1_i64)).is_err());
         assert!(read::<u8>(&Value::from(300_i64)).is_err());
         let biggest = Value::Integer(i128::from(u64::MAX));
         assert_eq!(read::<u64>(&biggest).unwrap(), u64::MAX);
         assert!(read::<i64>(&biggest).is_err());
-        assert!(read::<f64>(&Value::Integer(i128::from(i64::MAX))).is_err());
     }
 
     #[test]
-    fn an_integer_only_becomes_a_float_when_it_stays_exact() {
-        // Two to the sixtieth is exactly representable; one more is not.
+    fn an_integer_is_never_read_as_a_float_and_a_float_never_as_an_integer() {
+        // Two to the sixtieth is exactly representable as an `f64`, and is still refused: the
+        // kinds do not convert into one another.
+        assert!(read::<f64>(&Value::Integer(1_i128 << 60)).is_err());
+        assert!(read::<f64>(&Value::Integer(0)).is_err());
+        assert!(read::<f64>(&Value::from(8080_i64)).is_err());
+        assert!(read::<f32>(&Value::from(8080_i64)).is_err());
+
+        // A whole float is a float, never an integer.
+        assert!(read::<i64>(&Value::Float(8080.0)).is_err());
+        assert!(read::<u16>(&Value::Float(1.0)).is_err());
+        assert!(read::<i64>(&Value::Float(8080.5)).is_err());
+    }
+
+    #[test]
+    fn a_float_reads_only_as_the_float_kind_that_holds_it() {
         assert_eq!(
-            read::<f64>(&Value::Integer(1_i128 << 60))
-                .unwrap()
-                .to_bits(),
-            2_f64.powi(60).to_bits()
+            read::<f64>(&Value::Float(8080.0)).unwrap().to_bits(),
+            8080.0_f64.to_bits()
         );
-        assert!(read::<f64>(&Value::Integer((1_i128 << 60) + 1)).is_err());
-        assert!(read::<f64>(&Value::Integer(i128::MAX)).is_err());
-        assert!(read::<f64>(&Value::Integer(i128::MIN + 1)).is_err());
-        assert_eq!(
-            read::<f64>(&Value::Integer(i128::MIN)).unwrap().to_bits(),
-            (-2_f64.powi(127)).to_bits()
-        );
-        // A float that does not survive `f32` is rejected too.
+        assert_eq!(read::<f32>(&Value::Float(0.5)).unwrap(), 0.5);
+        // A float that does not survive `f32` is rejected.
         assert!(read::<f32>(&Value::Float(0.1)).is_err());
+        assert_eq!(
+            read::<f32>(&Value::Float(f64::from(f32::MAX))).unwrap(),
+            f32::MAX
+        );
+    }
+
+    #[test]
+    fn a_nested_failure_records_the_leaf_it_reached() {
+        let value = Value::map([("http", Value::map([("port", Value::from("not a number"))]))]);
+        let error = read::<Service>(&value).unwrap_err();
+        assert_eq!(error.expected(), "an unsigned 16-bit integer");
+        assert_eq!(
+            error.leaf(),
+            Some(&["http".to_owned(), "port".to_owned()][..])
+        );
+
+        let value = Value::array([Value::from(1_i64), Value::from("two")]);
+        let error = read::<Vec<u8>>(&value).unwrap_err();
+        assert_eq!(error.leaf(), Some(&["1".to_owned()][..]));
     }
 
     #[test]

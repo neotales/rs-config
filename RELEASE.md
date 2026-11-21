@@ -6,15 +6,15 @@ with a short-lived crates.io token obtained over OIDC. There is no
 
 ## The version rule
 
-The tag is `v` plus the version in `Cargo.toml`. Tag `v0.3.1` publishes the
-crate only if `Cargo.toml` says `version = "0.3.1"`. The `version` job fails the
-run otherwise, so a tag can never publish a version that differs from what is in
-the tree.
+The tag is `v` plus the version in `config/Cargo.toml`. Tag `v0.3.1` publishes the crate only if
+`config/Cargo.toml` says `version = "0.3.1"`. The `version` job fails the run otherwise, so a tag
+can never publish a version that differs from what is in the tree. The job reads one manifest per
+member, so a crate added to the workspace is added to that map at the same time.
 
 Bump the version, commit, push, then tag that commit:
 
 ```sh
-cargo publish --dry-run
+cargo publish -p neotales-config --dry-run
 git tag v0.3.1
 git push origin dev
 git push origin v0.3.1
@@ -38,7 +38,7 @@ lives beside this folder, in `~/work/rs`, and is deliberately not copied into
 the crate repository: it is how the first version of every crate is uploaded,
 not part of any one crate.
 
-1. Set `version = "0.0.0-alpha.0"` in `Cargo.toml`, commit it, and leave the
+1. Set `version = "0.0.0-alpha.0"` in `config/Cargo.toml`, commit it, and leave the
    working tree clean. Do not publish from a tree with uncommitted changes.
 2. Run the script with the crate's directory:
 
@@ -66,19 +66,20 @@ its publish trigger. Every later version publishes from its `v*` tag.
 If the crate name is taken on crates.io by someone else, stop. A rename is a
 different repository setup, not a flag.
 
-`cargo package` includes every tracked file, so `.github/` and `RELEASE.md`
-ship inside the published crate unless the manifest excludes them. That is
-harmless. Exclude them if package size matters. The README style guide lives
-at `~/work/rs/README.STYLE.md` and is not part of a crate.
+`cargo package -p neotales-config` includes every tracked file under `config/`, so the crate
+README, its licence, its docs, and its tests ship inside the published crate. The root
+`RELEASE.md`, `.github/`, and the workspace manifest stay out of the package: they belong to the
+repository, not the crate. The README style guide lives at `~/work/rs/README.STYLE.md` and is not
+part of a crate.
 
 ## Later releases
 
-1. Bump the version in `Cargo.toml` and commit it. `Cargo.lock` is committed on
+1. Bump the version in `config/Cargo.toml` and commit it. `Cargo.lock` is committed on
    purpose, so run `cargo build` and commit the updated lockfile with it. The
    lockfile is what the scheduled audit checks.
 2. Push the commit.
 3. Tag it `vX.Y.Z` and push the tag.
-4. The workflow runs the checks, then `cargo publish --dry-run`, then publishes
+4. The workflow runs the checks, then `cargo publish -p neotales-config --dry-run`, then publishes
    with a token minted for that run.
 
 A manual run, `workflow_dispatch`, runs the checks and the dry run only. It
@@ -102,7 +103,7 @@ cannot publish this crate later.
 
 | Symptom | Cause |
 | --- | --- |
-| `version` job: tag does not match `vX.Y.Z` | `Cargo.toml` version and the tag disagree. Delete the tag, fix, re-tag. |
+| `version` job: tag does not match `vX.Y.Z` | `config/Cargo.toml` version and the tag disagree. Delete the tag, fix, re-tag. |
 | Publish job: OIDC exchange fails | The crate does not exist yet, or the trusted publisher does not match: wrong repository, wrong workflow filename, or an environment name that is set on one side and not the other. |
 | Publish job: version already uploaded | The version was published before, usually by the manual first release. Bump the version. |
 | Publish job: `cargo publish` rejects the token | Trusted Publishing Only mode is on and the crate has no trusted publisher configured. |

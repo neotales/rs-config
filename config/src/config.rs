@@ -9,8 +9,8 @@ use std::{
 use serde::de::DeserializeOwned;
 
 use crate::{
-    de::Node,
-    error::Error,
+    de::{Cursor, DeError, Node},
+    error::{Error, SUPPORTED_DELIMITERS},
     source::{PendingSource, Source},
     value::Value,
 };
@@ -79,6 +79,15 @@ impl Builder {
     /// `http.port` are different paths: the first is two components and the second is one
     /// component whose name happens to contain a dot.
     ///
+    /// # Supported delimiters
+    ///
+    /// The delimiter must be one of `.` (the default), `:`, `/`, `,`, or `|`. The set is fixed and
+    /// documented rather than caller-defined: each entry is one ASCII byte that is not
+    /// alphanumeric, not whitespace, and not a control character, so the split is predictable and
+    /// a path reads the same in a message and in a log line. Any other character fails
+    /// [`Builder::build`] with [`Error::is_invalid_delimiter`] before a source is loaded. The
+    /// builder keeps the value until then, so this method is never the failing call.
+    ///
     /// A source key that contains the delimiter, or is empty, is not addressable through a
     /// string path, because the path splits on the delimiter and rejects an empty component. It
     /// stays in the tree and is readable through [`Config::load`] or [`Config::value`].
@@ -86,6 +95,26 @@ impl Builder {
     /// With the default `.`, the path `http.port` always means the nested map `http` then `port`.
     /// A top-level key whose name is literally `http.port` is not selected by it, and a missing
     /// nested map is [`Error::is_missing`], not the literal key.
+    ///
+    /// ```
+    /// use neotales_config::{Builder, Value};
+    ///
+    /// let config = Builder::new()
+    ///     .delimiter('|')
+    ///     .memory(
+    ///         "defaults",
+    ///         Value::map([("http", Value::map([("port", Value::from(8080_i64))]))]),
+    ///     )
+    ///     .build()?;
+    /// assert_eq!(config.get::<u16>("http|port")?, 8080);
+    ///
+    /// let error = Builder::new()
+    ///     .delimiter('a')
+    ///     .build()
+    ///     .expect_err("an alphanumeric delimiter is not supported");
+    /// assert!(error.is_invalid_delimiter());
+    /// # Ok::<(), neotales_config::Error>(())
+    /// ```
     #[must_use]
     pub const fn delimiter(mut self, delimiter: char) -> Self {
         self.delimiter = delimiter;
@@ -120,16 +149,20 @@ impl Builder {
 
     /// Builds the fixed immutable snapshot.
     ///
-    /// Every source is loaded in registration order before any value is merged. A source may
-    /// therefore fail without a partial result being observable.
+    /// The delimiter is checked first, then source names, then every source is loaded in
+    /// registration order before any value is merged. A source may therefore fail without a
+    /// partial result being observable, and a bad delimiter fails before a source is loaded.
     ///
     /// # Errors
     ///
+    /// - [`Error::is_invalid_delimiter`] when the builder's delimiter is not in the supported
+    ///   set. This is checked before any source is loaded.
     /// - [`Error::is_empty_source_name`] when a source has an empty name.
     /// - [`Error::is_duplicate_source`] when two sources share a name.
     /// - [`Error::is_source_failure`] when a source cannot load, contains a non-finite number, or
     ///   returns a root that is not a map.
     pub fn build(self) -> Result<Config, Error> {
+        check_delimiter(self.delimiter)?;
         check_names(&self.sources)?;
         let Self { sources, delimiter } = self;
 
@@ -158,6 +191,15 @@ impl Builder {
             merge_root(&mut snapshot, root, &source);
         }
         Ok(Config::root(Arc::new(snapshot), delimiter))
+    }
+}
+
+/// Rejects a delimiter outside the documented set before any source is loaded.
+fn check_delimiter(delimiter: char) -> Result<(), Error> {
+    if SUPPORTED_DELIMITERS.contains(&delimiter) {
+        Ok(())
+    } else {
+        Err(Error::invalid_delimiter())
     }
 }
 
@@ -331,28 +373,31 @@ impl Config {
 
     /// Deserializes a present value.
     ///
-    /// A lossless numeric fit is accepted: an integer that is non-negative reads as `u64`, an
-    /// exact integer reads as `f64`, and a finite float with no fraction reads as an integer in
-    /// range. A string is never parsed as a number.
+    /// Numeric kinds are strict. A [`Value::Integer`] reads as an integer type and a
+    /// [`Value::Float`] reads as a float type: an integer is never read as a float and a float is
+    /// never read as an integer, even when the float has no fraction. Within the integer kinds a
+    /// value narrows only when the target type holds it, and within the float kinds a value reads
+    /// only when the target type holds it exactly. A string is never parsed as a number.
     ///
     /// # Errors
     ///
     /// Returns [`Error::is_invalid_path`] when `path` is empty or has an empty component,
     /// [`Error::is_missing`] when the path is absent, and [`Error::is_type_mismatch`] when the
     /// value cannot be read as `T`. The mismatch names the expected shape, never the value and
-    /// never a caller-supplied serde message or expectation.
+    /// never a caller-supplied serde message or expectation. Its source is the one that wrote the
+    /// failing leaf when the snapshot records one, otherwise the nearest recorded ancestor: a
+    /// failure below a struct field is attributed to that field's source, not to the map that
+    /// contains it.
     pub fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, Error> {
         self.validate_path(path)?;
         let Some(value) = self.resolve(path) else {
             return Err(Error::missing(self.full_path(path)));
         };
-        T::deserialize(Node::Value(value)).map_err(|error| {
-            Error::type_mismatch(
-                self.full_path(path),
-                self.origin_for(path),
-                error.expected(),
-            )
-        })
+        let mut components: Vec<String> = self.cursor.to_vec();
+        components.extend(path.split(self.delimiter).map(str::to_owned));
+        let mut leaf = Vec::new();
+        T::deserialize(Cursor::new(Node::Value(value), &mut leaf))
+            .map_err(|error| self.mismatch(&components, &error))
     }
 
     /// Returns `default` only when the path is absent.
@@ -377,18 +422,16 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::is_type_mismatch`] when the document is not shaped like `T`.
+    /// Returns [`Error::is_type_mismatch`] when the document is not shaped like `T`. The source
+    /// named is the one that wrote the failing leaf when the snapshot records one.
     pub fn load<T: DeserializeOwned>(&self) -> Result<T, Error> {
         let Some(value) = self.focused() else {
             return Err(Error::missing(join(&self.cursor, self.delimiter)));
         };
-        T::deserialize(Node::Value(value)).map_err(|error| {
-            Error::type_mismatch(
-                join(&self.cursor, self.delimiter),
-                self.origin_of_cursor(),
-                error.expected(),
-            )
-        })
+        let components: Vec<String> = self.cursor.to_vec();
+        let mut leaf = Vec::new();
+        T::deserialize(Cursor::new(Node::Value(value), &mut leaf))
+            .map_err(|error| self.mismatch(&components, &error))
     }
 
     /// Returns the focused node without deserializing it.
@@ -455,11 +498,33 @@ impl Config {
             .map(|source| &**source)
     }
 
-    fn origin_of_cursor(&self) -> Option<&str> {
-        self.snapshot
-            .origin
-            .get(self.cursor.as_ref())
-            .map(|source| &**source)
+    /// Builds a type-mismatch error for the value at `components`.
+    ///
+    /// `error` names the leaf it failed on, relative to that value. Attribution goes to the source
+    /// that wrote the failing leaf when the tree records one, otherwise to the nearest recorded
+    /// ancestor. A leaf inside an array has no entry of its own, so the array's source, or the
+    /// nearest map above it, answers for it. Omitting attribution when nothing is recorded is
+    /// deliberate: a guess is worse than no name.
+    fn mismatch(&self, components: &[String], error: &DeError) -> Error {
+        let mut failing = components.to_vec();
+        if let Some(leaf) = error.leaf() {
+            failing.extend_from_slice(leaf);
+        }
+        Error::type_mismatch(
+            join(components, self.delimiter),
+            self.origin_below(&failing),
+            error.expected(),
+        )
+    }
+
+    /// The source of the deepest node at or above `components` that has one.
+    fn origin_below(&self, components: &[String]) -> Option<&str> {
+        for length in (0..=components.len()).rev() {
+            if let Some(source) = self.snapshot.origin.get(&components[..length]) {
+                return Some(source);
+            }
+        }
+        None
     }
 
     /// The full path of `path` relative to this cursor, for an error.

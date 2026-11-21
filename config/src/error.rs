@@ -57,6 +57,14 @@ impl fmt::Display for SourceError {
 
 impl StdError for SourceError {}
 
+/// The path delimiters a [`crate::Builder`] accepts.
+///
+/// The set is deliberately small and fixed. Every entry is a single ASCII byte that is not
+/// alphanumeric, not whitespace, and not a control character, so a path always splits on a
+/// character that reads the same in a message, a log line, and a manifest. Extending the set is a
+/// deliberate change to this list, not a per-caller option.
+pub(crate) const SUPPORTED_DELIMITERS: [char; 5] = ['.', ':', '/', ',', '|'];
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ErrorKind {
     Missing {
@@ -70,6 +78,7 @@ pub(crate) enum ErrorKind {
     InvalidPath {
         path: String,
     },
+    InvalidDelimiter,
     DuplicateSource {
         name: String,
     },
@@ -90,7 +99,8 @@ pub(crate) enum ErrorKind {
 ///
 /// [`fmt::Display`], [`fmt::Debug`], and [`StdError::source`] omit values, secrets, connection
 /// strings, and caller-supplied deserializer text. A path, a source name, and a fixed expected
-/// shape label are included; a caller must not put a secret in a path or a source name.
+/// shape label are included; a caller must not put a secret in a path or a source name. A type
+/// mismatch names the source that wrote the failing leaf when the snapshot records one.
 /// [`StdError::source`] is always `None`, so no foreign error can reintroduce its text.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Error {
@@ -121,6 +131,15 @@ impl Error {
     pub(crate) fn invalid_path(path: impl Into<String>) -> Self {
         Self {
             kind: ErrorKind::InvalidPath { path: path.into() },
+        }
+    }
+
+    /// The builder was given a delimiter outside [`SUPPORTED_DELIMITERS`].
+    ///
+    /// The rejected character is not stored, so the error cannot echo it.
+    pub(crate) const fn invalid_delimiter() -> Self {
+        Self {
+            kind: ErrorKind::InvalidDelimiter,
         }
     }
 
@@ -178,6 +197,15 @@ impl Error {
         matches!(self.kind, ErrorKind::InvalidPath { .. })
     }
 
+    /// Whether the builder was given a path delimiter outside the supported set.
+    ///
+    /// The supported delimiters are `.`, `:`, `/`, `,`, and `|`. The check runs at
+    /// [`crate::Builder::build`], before any source is loaded.
+    #[must_use]
+    pub const fn is_invalid_delimiter(&self) -> bool {
+        matches!(self.kind, ErrorKind::InvalidDelimiter)
+    }
+
     /// Whether two sources were registered under one name.
     #[must_use]
     pub const fn is_duplicate_source(&self) -> bool {
@@ -227,6 +255,7 @@ impl Error {
             | ErrorKind::DuplicateSource { name } => Some(name.as_str()),
             ErrorKind::Missing { .. }
             | ErrorKind::InvalidPath { .. }
+            | ErrorKind::InvalidDelimiter
             | ErrorKind::EmptySourceName => None,
         }
     }
@@ -238,7 +267,8 @@ impl Error {
             ErrorKind::Missing { path }
             | ErrorKind::TypeMismatch { path, .. }
             | ErrorKind::InvalidPath { path } => Some(path.as_str()),
-            ErrorKind::DuplicateSource { .. }
+            ErrorKind::InvalidDelimiter
+            | ErrorKind::DuplicateSource { .. }
             | ErrorKind::EmptySourceName
             | ErrorKind::Source { .. }
             | ErrorKind::Unrepresentable { .. }
@@ -284,6 +314,16 @@ impl fmt::Display for Error {
                 output,
                 "invalid path `{path}`: a path is one or more non-empty components"
             ),
+            ErrorKind::InvalidDelimiter => {
+                output.write_str("unsupported path delimiter: expected one of ")?;
+                for (index, delimiter) in SUPPORTED_DELIMITERS.iter().enumerate() {
+                    if index > 0 {
+                        output.write_str(", ")?;
+                    }
+                    write!(output, "`{delimiter}`")?;
+                }
+                Ok(())
+            }
             ErrorKind::DuplicateSource { name } => {
                 write!(output, "duplicate source name `{name}`")
             }

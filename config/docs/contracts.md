@@ -52,6 +52,18 @@ delimiter is `.`. Invalid forms are rejected before lookup:
 
 An invalid path returns `Error::is_invalid_path`. It is never treated as an absent key.
 
+### Delimiters
+
+The supported delimiters are `.` (the default), `:`, `/`, `,`, and `|`. The set is fixed rather
+than caller-defined. Each entry is one ASCII byte that is neither alphanumeric, whitespace, nor a
+control character, so a split is predictable and a path reads the same in a message and a log line.
+
+`Builder::delimiter` accepts any `char` and keeps it; `Builder::build` checks it before source
+names and before any source is loaded. A character outside the set fails with
+`Error::is_invalid_delimiter`. The rejected character is not stored on the error, so it cannot
+reach a log line. Extending the set is a deliberate change to the documented list, not a
+per-caller option.
+
 A custom delimiter only changes how a supplied path is split. With `:`, `http:port` is the nested
 path `http` then `port`, while `http.port` is one component named `http.port`. Under the default
 `.`, the latter spelling is the nested path, and a literal key of that name is not selected by it.
@@ -65,11 +77,18 @@ path `http` then `port`, while `http.port` is one component named `http.port`. U
 - `get_or` returns its default only for absence. A present wrong type is still a mismatch.
 - `load` deserializes the focused subtree.
 - `value` returns the focused node without deserializing it.
-- Numeric reads are exact. An integer reads as an unsigned type only when it is in range, and as a
-  float only when the float holds the same number. A float reads as an integer only when it has no
-  fraction and is in range. A string is never parsed as a number.
+- Numeric kinds are strict. A `Value::Integer` reads as an integer type, and only when the target
+  holds it: `u64::MAX` reads as `u64` and not as `i64`. A `Value::Float` reads as `f64`, or as
+  `f32` only when the narrowing is exact. An integer is never read as a float and a float is never
+  read as an integer, even when the number has no fraction, so `1` does not satisfy an `f64` read
+  and `1.0` does not satisfy an `i64` read. A string is never parsed as a number.
 - A deserialization error carries a fixed shape label. A caller-supplied serde message, a custom
   expectation, and a value are all discarded.
+- A type mismatch names the source that wrote the failing leaf when the snapshot records one,
+  otherwise the nearest recorded ancestor. A failure below a struct field is attributed to that
+  field's source, not to the source of the map that contains it. A leaf inside an array has no
+  entry of its own, so the array's source answers for it. When nothing is recorded, no source is
+  named rather than a guessed one.
 
 ## Immutability and cost
 
@@ -80,8 +99,8 @@ snapshot. A build allocates one snapshot; a failed build returns no `Config`.
 ## Errors
 
 `Error` names a path, a source name, a fixed shape label, or a fixed reason. It never stores or
-prints a value, a secret, a connection string, a file body, or foreign error text.
-`Error::source()` is always `None`, so no nested error can reintroduce text.
+prints a value, a secret, a connection string, a file body, a rejected delimiter, or foreign error
+text. `Error::source()` is always `None`, so no nested error can reintroduce text.
 
 ## Test map
 
@@ -92,8 +111,10 @@ prints a value, a secret, a connection string, a file body, or foreign error tex
 | Unique and non-empty source names | `tests/sources.rs` |
 | Map root enforcement | `tests/sources.rs` |
 | Invalid path forms and custom delimiter | `tests/paths.rs` |
+| Supported and rejected delimiters | `tests/delimiters.rs` |
 | Literal dotted key versus nested path | `tests/paths.rs`, `tests/typed.rs` |
 | Presence, absence, mismatch, `get_or` | `tests/typed.rs` |
-| Exact numbers and no string coercion | `tests/typed.rs`, `src/de.rs` |
-| Sanitized errors | `tests/errors.rs` |
+| Kind-strict numbers and no string coercion | `tests/typed.rs`, `src/de.rs` |
+| Leaf attribution on a nested mismatch | `tests/typed.rs`, `src/de.rs` |
+| Sanitized errors | `tests/errors.rs`, `tests/delimiters.rs` |
 | Snapshot clone and value-free `Debug` | `tests/immutability.rs` |

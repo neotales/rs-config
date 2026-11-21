@@ -177,42 +177,129 @@ fn a_string_is_never_parsed_as_a_number() {
 }
 
 #[test]
-fn numeric_reads_are_exact_and_never_rounded() {
+fn numeric_reads_are_exact_within_a_kind_and_never_across_kinds() {
     let config = Builder::new()
         .memory(
             "numbers",
             Value::map([
                 ("biggest", Value::Integer(i128::from(u64::MAX))),
-                ("float", Value::Float(8080.0)),
+                ("whole_float", Value::Float(8080.0)),
                 ("fraction", Value::Float(8080.5)),
+                ("narrow_float", Value::Float(0.1)),
                 ("max_i64", Value::Integer(i128::from(i64::MAX))),
-                ("power", Value::Integer(1_i128 << 60)),
-                ("power_plus", Value::Integer((1_i128 << 60) + 1)),
             ]),
         )
         .build()
         .expect("the fixture builds");
 
+    // Within the integer kinds, a value reads as a narrower type only when it fits.
     assert_eq!(config.get::<u64>("biggest").unwrap(), u64::MAX);
     assert!(config.get::<i64>("biggest").unwrap_err().is_type_mismatch());
-    assert_eq!(config.get::<i64>("float").unwrap(), 8080);
+
+    // Within the float kinds, a value reads only as a float that holds it exactly.
+    assert_eq!(config.get::<f64>("whole_float").unwrap(), 8080.0);
+    assert_eq!(config.get::<f32>("whole_float").unwrap(), 8080.0_f32);
     assert!(
         config
-            .get::<i64>("fraction")
+            .get::<f32>("narrow_float")
             .unwrap_err()
             .is_type_mismatch()
     );
-    assert!(config.get::<f64>("max_i64").unwrap_err().is_type_mismatch());
-    assert_eq!(
-        config.get::<f64>("power").unwrap().to_bits(),
-        2_f64.powi(60).to_bits()
-    );
-    assert!(
-        config
-            .get::<f64>("power_plus")
-            .unwrap_err()
-            .is_type_mismatch()
-    );
+
+    // An integer is never read as a float and a float is never read as an integer, even when the
+    // number has no fraction.
+    for kind in ["max_i64", "biggest"] {
+        assert!(
+            config.get::<f64>(kind).unwrap_err().is_type_mismatch(),
+            "{kind} as f64"
+        );
+        assert!(
+            config.get::<f32>(kind).unwrap_err().is_type_mismatch(),
+            "{kind} as f32"
+        );
+    }
+    for kind in ["whole_float", "fraction"] {
+        assert!(
+            config.get::<i64>(kind).unwrap_err().is_type_mismatch(),
+            "{kind} as i64"
+        );
+        assert!(
+            config.get::<u16>(kind).unwrap_err().is_type_mismatch(),
+            "{kind} as u16"
+        );
+    }
+}
+
+#[test]
+fn a_nested_type_mismatch_names_the_source_of_the_failing_leaf() {
+    let config = Builder::new()
+        .memory(
+            "defaults",
+            Value::map([(
+                "net",
+                Value::map([(
+                    "server",
+                    Value::map([
+                        ("port", Value::from(8080_i64)),
+                        ("host", Value::from("localhost")),
+                    ]),
+                )]),
+            )]),
+        )
+        .memory(
+            "overlay",
+            Value::map([(
+                "net",
+                Value::map([("server", Value::map([("port", Value::from("oops"))]))]),
+            )]),
+        )
+        .build()
+        .expect("the fixture builds");
+
+    // The nested map was introduced by `defaults`; only the failing leaf came from `overlay`.
+    assert_eq!(config.origin("net.server").unwrap(), "defaults");
+    assert_eq!(config.origin("net.server.port").unwrap(), "overlay");
+
+    let error = config
+        .get::<Http>("net.server")
+        .expect_err("the leaf is a string");
+    assert!(error.is_type_mismatch(), "{error}");
+    assert_eq!(error.path(), Some("net.server"));
+    assert_eq!(error.source_name(), Some("overlay"), "{error}");
+
+    // The same holds when a child cursor loads its focused value.
+    let error = config
+        .child("net.server")
+        .unwrap()
+        .load::<Http>()
+        .expect_err("the leaf is a string");
+    assert!(error.is_type_mismatch(), "{error}");
+    assert_eq!(error.source_name(), Some("overlay"), "{error}");
+}
+
+#[test]
+fn a_nested_mismatch_inside_an_array_names_the_array_source() {
+    let config = Builder::new()
+        .memory(
+            "defaults",
+            Value::map([("ports", Value::array([Value::from(80_i64)]))]),
+        )
+        .memory(
+            "overlay",
+            Value::map([(
+                "ports",
+                Value::array([Value::from(80_i64), Value::from("oops")]),
+            )]),
+        )
+        .build()
+        .expect("the fixture builds");
+
+    // An array has no provenance of its own; the array node's source answers for its elements.
+    let error = config
+        .get::<Vec<u16>>("ports")
+        .expect_err("the second element is a string");
+    assert!(error.is_type_mismatch(), "{error}");
+    assert_eq!(error.source_name(), Some("overlay"), "{error}");
 }
 
 #[test]
@@ -227,4 +314,14 @@ fn a_child_can_load_its_focused_value() {
         }
     );
     assert_eq!(http.value().unwrap().type_name(), "map");
+}
+
+#[test]
+fn a_mismatch_on_the_root_names_no_source() {
+    // The root map was never written by a source, so there is nothing to attribute. Omitting the
+    // source is deliberate: a guessed name is worse than no name.
+    let config = Builder::new().build().expect("an empty build succeeds");
+    let error = config.load::<i64>().expect_err("the root is a map");
+    assert!(error.is_type_mismatch(), "{error}");
+    assert_eq!(error.source_name(), None, "{error}");
 }

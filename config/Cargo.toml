@@ -1,0 +1,26 @@
+[package]
+name = "neotales-config"
+description = "Process-local configuration: ordered sources merged into one immutable, typed snapshot"
+version = "0.0.0-alpha.0"
+edition = "2024"
+rust-version = "1.100"
+license = "MIT"
+repository = "https://github.com/neotales/rs-config"
+authors = ["x0craft"]
+readme = "README.md"
+keywords = ["config", "configuration", "settings", "precedence", "merge"]
+categories = ["config"]
+
+[features]
+# The core has no optional provider and no optional dependency. A format
+# parser, the environment, dotenv, arguments and watching are separate work.
+default = []
+
+[dependencies]
+serde = { version = "1.0", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+serde = { version = "1.0", features = ["derive"] }
+
+[lints]
+workspace = true

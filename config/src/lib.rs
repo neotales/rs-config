@@ -12,14 +12,19 @@
 //! - **A source root is a map.** A source that returns any other [`Value`] fails the build.
 //! - **Source names are unique.** An empty name or a repeated name fails the build.
 //! - **Typed reads are strict.** A missing path is not a type mismatch, and a string is never
-//!   parsed as a number. [`Config::get_or`] returns its default only for absence.
+//!   parsed as a number. An integer is never read as a float and a float is never read as an
+//!   integer, even when the number has no fraction. [`Config::get_or`] returns its default only
+//!   for absence.
 //! - **Paths are validated.** A path is one or more non-empty components separated by the
 //!   builder's delimiter, `.` by default. An empty path, a leading or trailing delimiter, or two
-//!   adjacent delimiters is an [`Error::is_invalid_path`] error.
+//!   adjacent delimiters is an [`Error::is_invalid_path`] error. The delimiter is one of `.`,
+//!   `:`, `/`, `,`, or `|`; anything else fails the build with [`Error::is_invalid_delimiter`]
+//!   before a source is loaded.
 //! - **Errors never echo a value.** An error names a path, a source, and a fixed shape label. It
 //!   never carries a value, a connection string, or text from a caller-supplied deserializer.
 //! - **Provenance is per node.** [`Config::origin`] reports the source that introduced or last
-//!   replaced a node. Replacing a subtree drops the provenance below it.
+//!   replaced a node. Replacing a subtree drops the provenance below it. A type mismatch names
+//!   the source of the failing leaf, not the map that contains it.
 //!
 //! This release has no file, environment, argument, dotenv, reload, or vault provider. The root
 //! contract is the whole provider surface: a caller supplies a [`Value`] map or implements

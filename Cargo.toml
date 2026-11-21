@@ -1,37 +1,23 @@
-[package]
-name = "neotales-config"
-description = "Process-local configuration: ordered sources merged into one immutable, typed snapshot"
-version = "0.0.0-alpha.0"
-edition = "2024"
-rust-version = "1.100"
-license = "MIT"
-repository = "https://github.com/neotales/rs-config"
-authors = ["x0craft"]
-readme = "README.md"
-keywords = ["config", "configuration", "settings", "precedence", "merge"]
-categories = ["config"]
+[workspace]
+# A virtual manifest: the repository root is a workspace, not a package.
+# `config/` is `neotales-config`; a crate that versions with it gets its own
+# top-level directory rather than a place under `crates/`.
+#
+# Every member is a virtual workspace member, so Cargo's default members are
+# all of them: a bare `cargo test` at the root reaches every crate.
+resolver = "3"
+members = ["config"]
 
-[features]
-# The core has no optional provider and no optional dependency. A format
-# parser, the environment, dotenv, arguments and watching are separate work.
-default = []
-
-[dependencies]
-serde = { version = "1.0", default-features = false, features = ["std"] }
-
-[dev-dependencies]
-serde = { version = "1.0", features = ["derive"] }
-
-[lints.rust]
+[workspace.lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
 missing_debug_implementations = "warn"
 unreachable_pub = "warn"
 
-[lints.rustdoc]
+[workspace.lints.rustdoc]
 broken_intra_doc_links = "warn"
 private_intra_doc_links = "warn"
 
-[lints.clippy]
+[workspace.lints.clippy]
 all = "warn"
 pedantic = "warn"

@@ -19,13 +19,15 @@ pub enum Value {
     Bool(bool),
     /// An integer.
     ///
-    /// Holds every `i128`. A typed read narrows it to the target type and fails when the target
-    /// cannot hold it.
+    /// Holds every `i128`. A typed read narrows it to the target integer type and fails when the
+    /// target cannot hold it. It is never read as a float, and a float is never read as an
+    /// integer, even when the number has no fraction.
     Integer(i128),
     /// A floating-point number.
     ///
     /// A source that would produce a non-finite number is rejected at build, so this variant is
-    /// always finite in a published snapshot.
+    /// always finite in a published snapshot. A typed read reads it only as a narrower float that
+    /// holds it exactly.
     Float(f64),
     /// A string. A secret reference stays a string and is never resolved.
     String(String),
