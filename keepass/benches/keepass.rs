@@ -122,8 +122,11 @@ fn bench_vault(
 
     group.finish();
 
-    // A credential rotation and a replacement file both go through `refresh`;
-    // an unchanged poll fingerprints the KDBX path without loading.
+    // The fixture is never modified, so both reload paths must return
+    // `Unchanged`. The assertions sit inside the timed closures: a failed load
+    // or a silently different snapshot fails the benchmark instead of being
+    // recorded as a reload time. `refresh` reloads, maps, merges, and compares
+    // without publishing; `refresh_if_changed` only fingerprints the path.
     #[cfg(feature = "reload")]
     {
         let reload = Builder::new()
@@ -133,10 +136,18 @@ fn bench_vault(
             .expect("reloadable vault");
         let mut group = criterion.benchmark_group(format!("keepass/{label}"));
         group.bench_function("refresh", |bencher| {
-            bencher.iter(|| black_box(reload.refresh()));
+            bencher.iter(|| {
+                let outcome = reload.refresh();
+                assert_eq!(outcome, neotales_config::RefreshOutcome::Unchanged);
+                black_box(outcome);
+            });
         });
         group.bench_function("refresh-unchanged", |bencher| {
-            bencher.iter(|| black_box(reload.refresh_if_changed()));
+            bencher.iter(|| {
+                let outcome = reload.refresh_if_changed();
+                assert_eq!(outcome, neotales_config::RefreshOutcome::Unchanged);
+                black_box(outcome);
+            });
         });
         group.finish();
     }

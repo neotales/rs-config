@@ -2,8 +2,11 @@
 //!
 //! Every document is produced from fixed integer formulas, never from a random
 //! source and never from a file outside the temporary directory. The same
-//! logical configuration is rendered into each dialect, so a comparison between
-//! formats is a comparison of the dialect's parser and not of its fixture.
+//! service rows and logical field values are rendered into each dialect where
+//! the dialect can express them, but the documents are not identical: INI and
+//! dotenv hold only strings and cannot express the array, and other dialects
+//! use their own spellings. A cross-format comparison therefore compares work on
+//! similarly sized documents, not byte-identical inputs.
 //!
 //! The values are synthetic and deliberately non-secret: loopback hosts,
 //! `fixture`-style names, and a database URL with a user but no password. No

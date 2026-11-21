@@ -1,0 +1,671 @@
+   Compiling neotales-config v0.0.0-alpha.0 (/home/dev/work/rs/config/config)
+    Finished `bench` profile [optimized] target(s) in 12.04s
+     Running benches/sources.rs (target/release/build/neotales-config/873a432396327e4d/out/sources-873a432396327e4d)
+Benchmarking memory/small/build
+Benchmarking memory/small/build: Warming up for 300.00 ms
+Benchmarking memory/small/build: Collecting 20 samples in estimated 802.86 ms (53k iterations)
+Benchmarking memory/small/build: Analyzing
+memory/small/build      time:   [16.066 µs 16.413 µs 16.892 µs]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+
+Benchmarking memory/realistic/build
+Benchmarking memory/realistic/build: Warming up for 300.00 ms
+Benchmarking memory/realistic/build: Collecting 20 samples in estimated 892.05 ms (1050 iterations)
+Benchmarking memory/realistic/build: Analyzing
+memory/realistic/build  time:   [830.67 µs 847.38 µs 879.73 µs]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+
+Benchmarking memory/realistic-merge/build
+Benchmarking memory/realistic-merge/build: Warming up for 300.00 ms
+Benchmarking memory/realistic-merge/build: Collecting 20 samples in estimated 902.89 ms (1050 iterations)
+Benchmarking memory/realistic-merge/build: Analyzing
+memory/realistic-merge/build
+                        time:   [853.56 µs 864.25 µs 875.44 µs]
+
+Benchmarking json/small/read
+Benchmarking json/small/read: Warming up for 300.00 ms
+Benchmarking json/small/read: Collecting 20 samples in estimated 800.35 ms (212k iterations)
+Benchmarking json/small/read: Analyzing
+json/small/read         time:   [3.7635 µs 3.7847 µs 3.8081 µs]
+                        thrpt:  [168.29 MiB/s 169.33 MiB/s 170.29 MiB/s]
+Benchmarking json/small/parse
+Benchmarking json/small/parse: Warming up for 300.00 ms
+Benchmarking json/small/parse: Collecting 20 samples in estimated 800.85 ms (195k iterations)
+Benchmarking json/small/parse: Analyzing
+json/small/parse        time:   [4.0449 µs 4.0888 µs 4.1260 µs]
+                        thrpt:  [155.32 MiB/s 156.74 MiB/s 158.44 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking json/small/load
+Benchmarking json/small/load: Warming up for 300.00 ms
+Benchmarking json/small/load: Collecting 20 samples in estimated 801.37 ms (81k iterations)
+Benchmarking json/small/load: Analyzing
+json/small/load         time:   [9.8240 µs 9.9002 µs 9.9672 µs]
+                        thrpt:  [64.298 MiB/s 64.733 MiB/s 65.235 MiB/s]
+Benchmarking json/small/build
+Benchmarking json/small/build: Warming up for 300.00 ms
+Benchmarking json/small/build: Collecting 20 samples in estimated 801.25 ms (32k iterations)
+Benchmarking json/small/build: Analyzing
+json/small/build        time:   [24.733 µs 25.491 µs 26.576 µs]
+                        thrpt:  [24.115 MiB/s 25.141 MiB/s 25.912 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+
+Benchmarking json/small/refresh
+Benchmarking json/small/refresh: Warming up for 300.00 ms
+Benchmarking json/small/refresh: Collecting 20 samples in estimated 802.80 ms (28k iterations)
+Benchmarking json/small/refresh: Analyzing
+json/small/refresh      time:   [28.417 µs 28.963 µs 29.907 µs]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking json/small/refresh-unchanged
+Benchmarking json/small/refresh-unchanged: Warming up for 300.00 ms
+Benchmarking json/small/refresh-unchanged: Collecting 20 samples in estimated 800.50 ms (197k iterations)
+Benchmarking json/small/refresh-unchanged: Analyzing
+json/small/refresh-unchanged
+                        time:   [4.0271 µs 4.0524 µs 4.0848 µs]
+
+Benchmarking json/realistic/read
+Benchmarking json/realistic/read: Warming up for 300.00 ms
+Benchmarking json/realistic/read: Collecting 20 samples in estimated 801.01 ms (137k iterations)
+Benchmarking json/realistic/read: Analyzing
+json/realistic/read     time:   [5.6415 µs 5.6856 µs 5.7553 µs]
+                        thrpt:  [4.1481 GiB/s 4.1989 GiB/s 4.2318 GiB/s]
+Found 4 outliers among 20 measurements (20.00%)
+  1 (5.00%) high mild
+  3 (15.00%) high severe
+Benchmarking json/realistic/parse
+Benchmarking json/realistic/parse: Warming up for 300.00 ms
+Benchmarking json/realistic/parse: Collecting 20 samples in estimated 822.76 ms (3990 iterations)
+Benchmarking json/realistic/parse: Analyzing
+json/realistic/parse    time:   [196.76 µs 198.08 µs 199.61 µs]
+                        thrpt:  [122.47 MiB/s 123.41 MiB/s 124.24 MiB/s]
+Benchmarking json/realistic/load
+Benchmarking json/realistic/load: Warming up for 300.00 ms
+Benchmarking json/realistic/load: Collecting 20 samples in estimated 851.30 ms (3150 iterations)
+Benchmarking json/realistic/load: Analyzing
+json/realistic/load     time:   [267.60 µs 273.21 µs 281.44 µs]
+                        thrpt:  [86.863 MiB/s 89.479 MiB/s 91.355 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+Benchmarking json/realistic/build
+Benchmarking json/realistic/build: Warming up for 300.00 ms
+Benchmarking json/realistic/build: Collecting 20 samples in estimated 958.12 ms (1050 iterations)
+Benchmarking json/realistic/build: Analyzing
+json/realistic/build    time:   [902.39 µs 938.28 µs 991.93 µs]
+                        thrpt:  [24.645 MiB/s 26.055 MiB/s 27.091 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking json/realistic/refresh
+Benchmarking json/realistic/refresh: Warming up for 300.00 ms
+Benchmarking json/realistic/refresh: Collecting 20 samples in estimated 849.02 ms (840 iterations)
+Benchmarking json/realistic/refresh: Analyzing
+json/realistic/refresh  time:   [970.87 µs 979.76 µs 989.88 µs]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking json/realistic/refresh-unchanged
+Benchmarking json/realistic/refresh-unchanged: Warming up for 300.00 ms
+Benchmarking json/realistic/refresh-unchanged: Collecting 20 samples in estimated 806.57 ms (25k iterations)
+Benchmarking json/realistic/refresh-unchanged: Analyzing
+json/realistic/refresh-unchanged
+                        time:   [31.233 µs 31.385 µs 31.606 µs]
+
+Benchmarking json5/small/read
+Benchmarking json5/small/read: Warming up for 300.00 ms
+Benchmarking json5/small/read: Collecting 20 samples in estimated 800.73 ms (211k iterations)
+Benchmarking json5/small/read: Analyzing
+json5/small/read        time:   [3.7857 µs 3.8239 µs 3.8714 µs]
+                        thrpt:  [168.74 MiB/s 170.84 MiB/s 172.56 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking json5/small/parse
+Benchmarking json5/small/parse: Warming up for 300.00 ms
+Benchmarking json5/small/parse: Collecting 20 samples in estimated 801.16 ms (88k iterations)
+Benchmarking json5/small/parse: Analyzing
+json5/small/parse       time:   [9.1559 µs 9.4354 µs 9.7334 µs]
+                        thrpt:  [67.116 MiB/s 69.236 MiB/s 71.349 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking json5/small/load
+Benchmarking json5/small/load: Warming up for 300.00 ms
+Benchmarking json5/small/load: Collecting 20 samples in estimated 800.52 ms (47k iterations)
+Benchmarking json5/small/load: Analyzing
+json5/small/load        time:   [15.958 µs 16.165 µs 16.369 µs]
+                        thrpt:  [39.908 MiB/s 40.413 MiB/s 40.938 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking json5/small/build
+Benchmarking json5/small/build: Warming up for 300.00 ms
+Benchmarking json5/small/build: Collecting 20 samples in estimated 800.05 ms (28k iterations)
+Benchmarking json5/small/build: Analyzing
+json5/small/build       time:   [29.213 µs 29.854 µs 30.656 µs]
+                        thrpt:  [21.309 MiB/s 21.882 MiB/s 22.363 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+
+Benchmarking json5/small/refresh
+Benchmarking json5/small/refresh: Warming up for 300.00 ms
+Benchmarking json5/small/refresh: Collecting 20 samples in estimated 804.97 ms (23k iterations)
+Benchmarking json5/small/refresh: Analyzing
+json5/small/refresh     time:   [34.140 µs 34.560 µs 34.975 µs]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking json5/small/refresh-unchanged
+Benchmarking json5/small/refresh-unchanged: Warming up for 300.00 ms
+Benchmarking json5/small/refresh-unchanged: Collecting 20 samples in estimated 800.08 ms (186k iterations)
+Benchmarking json5/small/refresh-unchanged: Analyzing
+json5/small/refresh-unchanged
+                        time:   [4.1097 µs 4.1527 µs 4.1957 µs]
+Found 3 outliers among 20 measurements (15.00%)
+  2 (10.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking json5/realistic/read
+Benchmarking json5/realistic/read: Warming up for 300.00 ms
+Benchmarking json5/realistic/read: Collecting 20 samples in estimated 800.56 ms (143k iterations)
+Benchmarking json5/realistic/read: Analyzing
+json5/realistic/read    time:   [5.4686 µs 5.4999 µs 5.5371 µs]
+                        thrpt:  [3.9622 GiB/s 3.9890 GiB/s 4.0118 GiB/s]
+Benchmarking json5/realistic/parse
+Benchmarking json5/realistic/parse: Warming up for 300.00 ms
+Benchmarking json5/realistic/parse: Collecting 20 samples in estimated 819.83 ms (2100 iterations)
+Benchmarking json5/realistic/parse: Analyzing
+json5/realistic/parse   time:   [380.28 µs 385.03 µs 390.05 µs]
+                        thrpt:  [57.597 MiB/s 58.348 MiB/s 59.077 MiB/s]
+Benchmarking json5/realistic/load
+Benchmarking json5/realistic/load: Warming up for 300.00 ms
+Benchmarking json5/realistic/load: Collecting 20 samples in estimated 871.88 ms (1890 iterations)
+Benchmarking json5/realistic/load: Analyzing
+json5/realistic/load    time:   [467.74 µs 474.46 µs 482.21 µs]
+                        thrpt:  [46.589 MiB/s 47.350 MiB/s 48.031 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking json5/realistic/build
+Benchmarking json5/realistic/build: Warming up for 300.00 ms
+Benchmarking json5/realistic/build: Collecting 20 samples in estimated 1.0005 s (840 iterations)
+Benchmarking json5/realistic/build: Analyzing
+json5/realistic/build   time:   [1.0998 ms 1.1339 ms 1.1729 ms]
+                        thrpt:  [19.154 MiB/s 19.813 MiB/s 20.427 MiB/s]
+
+Benchmarking json5/realistic/refresh
+Benchmarking json5/realistic/refresh: Warming up for 300.00 ms
+Benchmarking json5/realistic/refresh: Collecting 20 samples in estimated 970.60 ms (840 iterations)
+Benchmarking json5/realistic/refresh: Analyzing
+json5/realistic/refresh time:   [1.1629 ms 1.1687 ms 1.1753 ms]
+Benchmarking json5/realistic/refresh-unchanged
+Benchmarking json5/realistic/refresh-unchanged: Warming up for 300.00 ms
+Benchmarking json5/realistic/refresh-unchanged: Collecting 20 samples in estimated 804.60 ms (28k iterations)
+Benchmarking json5/realistic/refresh-unchanged: Analyzing
+json5/realistic/refresh-unchanged
+                        time:   [28.871 µs 29.009 µs 29.151 µs]
+
+Benchmarking jsonc/small/read
+Benchmarking jsonc/small/read: Warming up for 300.00 ms
+Benchmarking jsonc/small/read: Collecting 20 samples in estimated 800.28 ms (210k iterations)
+Benchmarking jsonc/small/read: Analyzing
+jsonc/small/read        time:   [3.7688 µs 3.7997 µs 3.8366 µs]
+                        thrpt:  [188.17 MiB/s 190.00 MiB/s 191.55 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking jsonc/small/parse
+Benchmarking jsonc/small/parse: Warming up for 300.00 ms
+Benchmarking jsonc/small/parse: Collecting 20 samples in estimated 801.18 ms (138k iterations)
+Benchmarking jsonc/small/parse: Analyzing
+jsonc/small/parse       time:   [5.7356 µs 5.7709 µs 5.8150 µs]
+                        thrpt:  [124.15 MiB/s 125.10 MiB/s 125.87 MiB/s]
+Benchmarking jsonc/small/load
+Benchmarking jsonc/small/load: Warming up for 300.00 ms
+Benchmarking jsonc/small/load: Collecting 20 samples in estimated 802.39 ms (54k iterations)
+Benchmarking jsonc/small/load: Analyzing
+jsonc/small/load        time:   [14.827 µs 14.939 µs 15.038 µs]
+                        thrpt:  [48.007 MiB/s 48.324 MiB/s 48.689 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking jsonc/small/build
+Benchmarking jsonc/small/build: Warming up for 300.00 ms
+Benchmarking jsonc/small/build: Collecting 20 samples in estimated 800.73 ms (27k iterations)
+Benchmarking jsonc/small/build: Analyzing
+jsonc/small/build       time:   [28.826 µs 29.204 µs 29.793 µs]
+                        thrpt:  [24.232 MiB/s 24.720 MiB/s 25.044 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking jsonc/small/refresh
+Benchmarking jsonc/small/refresh: Warming up for 300.00 ms
+Benchmarking jsonc/small/refresh: Collecting 20 samples in estimated 805.54 ms (24k iterations)
+Benchmarking jsonc/small/refresh: Analyzing
+jsonc/small/refresh     time:   [32.931 µs 33.244 µs 33.564 µs]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking jsonc/small/refresh-unchanged
+Benchmarking jsonc/small/refresh-unchanged: Warming up for 300.00 ms
+Benchmarking jsonc/small/refresh-unchanged: Collecting 20 samples in estimated 800.41 ms (188k iterations)
+Benchmarking jsonc/small/refresh-unchanged: Analyzing
+jsonc/small/refresh-unchanged
+                        time:   [4.2217 µs 4.2520 µs 4.2763 µs]
+
+Benchmarking jsonc/realistic/read
+Benchmarking jsonc/realistic/read: Warming up for 300.00 ms
+Benchmarking jsonc/realistic/read: Collecting 20 samples in estimated 800.85 ms (142k iterations)
+Benchmarking jsonc/realistic/read: Analyzing
+jsonc/realistic/read    time:   [5.6541 µs 5.6952 µs 5.7634 µs]
+                        thrpt:  [4.5244 GiB/s 4.5786 GiB/s 4.6119 GiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking jsonc/realistic/parse
+Benchmarking jsonc/realistic/parse: Warming up for 300.00 ms
+Benchmarking jsonc/realistic/parse: Collecting 20 samples in estimated 807.96 ms (3570 iterations)
+Benchmarking jsonc/realistic/parse: Analyzing
+jsonc/realistic/parse   time:   [226.46 µs 228.08 µs 230.20 µs]
+                        thrpt:  [116.00 MiB/s 117.07 MiB/s 117.91 MiB/s]
+Found 3 outliers among 20 measurements (15.00%)
+  3 (15.00%) high mild
+Benchmarking jsonc/realistic/load
+Benchmarking jsonc/realistic/load: Warming up for 300.00 ms
+Benchmarking jsonc/realistic/load: Collecting 20 samples in estimated 864.91 ms (1890 iterations)
+Benchmarking jsonc/realistic/load: Analyzing
+jsonc/realistic/load    time:   [454.58 µs 458.84 µs 463.96 µs]
+                        thrpt:  [57.552 MiB/s 58.194 MiB/s 58.740 MiB/s]
+Benchmarking jsonc/realistic/build
+Benchmarking jsonc/realistic/build: Warming up for 300.00 ms
+Benchmarking jsonc/realistic/build: Collecting 20 samples in estimated 931.61 ms (840 iterations)
+Benchmarking jsonc/realistic/build: Analyzing
+jsonc/realistic/build   time:   [1.0880 ms 1.0999 ms 1.1124 ms]
+                        thrpt:  [24.004 MiB/s 24.276 MiB/s 24.543 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking jsonc/realistic/refresh
+Benchmarking jsonc/realistic/refresh: Warming up for 300.00 ms
+Benchmarking jsonc/realistic/refresh: Collecting 20 samples in estimated 993.13 ms (840 iterations)
+Benchmarking jsonc/realistic/refresh: Analyzing
+jsonc/realistic/refresh time:   [1.1861 ms 1.2024 ms 1.2198 ms]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking jsonc/realistic/refresh-unchanged
+Benchmarking jsonc/realistic/refresh-unchanged: Warming up for 300.00 ms
+Benchmarking jsonc/realistic/refresh-unchanged: Collecting 20 samples in estimated 801.47 ms (24k iterations)
+Benchmarking jsonc/realistic/refresh-unchanged: Analyzing
+jsonc/realistic/refresh-unchanged
+                        time:   [34.233 µs 34.505 µs 34.695 µs]
+
+Benchmarking toml/small/read
+Benchmarking toml/small/read: Warming up for 300.00 ms
+Benchmarking toml/small/read: Collecting 20 samples in estimated 800.11 ms (176k iterations)
+Benchmarking toml/small/read: Analyzing
+toml/small/read         time:   [3.8411 µs 3.9589 µs 4.1187 µs]
+                        thrpt:  [150.04 MiB/s 156.10 MiB/s 160.89 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+Benchmarking toml/small/parse
+Benchmarking toml/small/parse: Warming up for 300.00 ms
+Benchmarking toml/small/parse: Collecting 20 samples in estimated 801.94 ms (50k iterations)
+Benchmarking toml/small/parse: Analyzing
+toml/small/parse        time:   [14.365 µs 14.641 µs 14.956 µs]
+                        thrpt:  [41.319 MiB/s 42.209 MiB/s 43.019 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking toml/small/load
+Benchmarking toml/small/load: Warming up for 300.00 ms
+Benchmarking toml/small/load: Collecting 20 samples in estimated 800.55 ms (34k iterations)
+Benchmarking toml/small/load: Analyzing
+toml/small/load         time:   [22.979 µs 23.262 µs 23.687 µs]
+                        thrpt:  [26.089 MiB/s 26.566 MiB/s 26.894 MiB/s]
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) high mild
+  2 (10.00%) high severe
+Benchmarking toml/small/build
+Benchmarking toml/small/build: Warming up for 300.00 ms
+Benchmarking toml/small/build: Collecting 20 samples in estimated 801.08 ms (20k iterations)
+Benchmarking toml/small/build: Analyzing
+toml/small/build        time:   [38.528 µs 45.338 µs 53.038 µs]
+                        thrpt:  [11.652 MiB/s 13.631 MiB/s 16.040 MiB/s]
+Found 3 outliers among 20 measurements (15.00%)
+  3 (15.00%) high severe
+
+Benchmarking toml/small/refresh
+Benchmarking toml/small/refresh: Warming up for 300.00 ms
+Benchmarking toml/small/refresh: Collecting 20 samples in estimated 809.50 ms (13k iterations)
+Benchmarking toml/small/refresh: Analyzing
+toml/small/refresh      time:   [44.198 µs 45.496 µs 47.339 µs]
+Found 3 outliers among 20 measurements (15.00%)
+  2 (10.00%) high mild
+  1 (5.00%) high severe
+Benchmarking toml/small/refresh-unchanged
+Benchmarking toml/small/refresh-unchanged: Warming up for 300.00 ms
+Benchmarking toml/small/refresh-unchanged: Collecting 20 samples in estimated 800.76 ms (199k iterations)
+Benchmarking toml/small/refresh-unchanged: Analyzing
+toml/small/refresh-unchanged
+                        time:   [4.0152 µs 4.0472 µs 4.0925 µs]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking toml/realistic/read
+Benchmarking toml/realistic/read: Warming up for 300.00 ms
+Benchmarking toml/realistic/read: Collecting 20 samples in estimated 800.48 ms (150k iterations)
+Benchmarking toml/realistic/read: Analyzing
+toml/realistic/read     time:   [5.3549 µs 5.4917 µs 5.6928 µs]
+                        thrpt:  [3.8633 GiB/s 4.0048 GiB/s 4.1071 GiB/s]
+Found 3 outliers among 20 measurements (15.00%)
+  3 (15.00%) high severe
+Benchmarking toml/realistic/parse
+Benchmarking toml/realistic/parse: Warming up for 300.00 ms
+Benchmarking toml/realistic/parse: Collecting 20 samples in estimated 925.16 ms (1470 iterations)
+Benchmarking toml/realistic/parse: Analyzing
+toml/realistic/parse    time:   [618.50 µs 627.68 µs 638.59 µs]
+                        thrpt:  [35.267 MiB/s 35.880 MiB/s 36.412 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking toml/realistic/load
+Benchmarking toml/realistic/load: Warming up for 300.00 ms
+Benchmarking toml/realistic/load: Collecting 20 samples in estimated 855.88 ms (1050 iterations)
+Benchmarking toml/realistic/load: Analyzing
+toml/realistic/load     time:   [810.78 µs 816.33 µs 823.56 µs]
+                        thrpt:  [27.346 MiB/s 27.588 MiB/s 27.777 MiB/s]
+Benchmarking toml/realistic/build
+Benchmarking toml/realistic/build: Warming up for 300.00 ms
+Benchmarking toml/realistic/build: Collecting 20 samples in estimated 950.83 ms (630 iterations)
+Benchmarking toml/realistic/build: Analyzing
+toml/realistic/build    time:   [1.4645 ms 1.4943 ms 1.5257 ms]
+                        thrpt:  [14.761 MiB/s 15.071 MiB/s 15.378 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+
+Benchmarking toml/realistic/refresh
+Benchmarking toml/realistic/refresh: Warming up for 300.00 ms
+Benchmarking toml/realistic/refresh: Collecting 20 samples in estimated 979.69 ms (630 iterations)
+Benchmarking toml/realistic/refresh: Analyzing
+toml/realistic/refresh  time:   [1.6162 ms 1.7077 ms 1.8720 ms]
+Benchmarking toml/realistic/refresh-unchanged
+Benchmarking toml/realistic/refresh-unchanged: Warming up for 300.00 ms
+Benchmarking toml/realistic/refresh-unchanged: Collecting 20 samples in estimated 800.57 ms (27k iterations)
+Benchmarking toml/realistic/refresh-unchanged: Analyzing
+toml/realistic/refresh-unchanged
+                        time:   [28.863 µs 29.129 µs 29.400 µs]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking yaml/small/read
+Benchmarking yaml/small/read: Warming up for 300.00 ms
+Benchmarking yaml/small/read: Collecting 20 samples in estimated 800.44 ms (201k iterations)
+Benchmarking yaml/small/read: Analyzing
+yaml/small/read         time:   [3.7858 µs 3.8063 µs 3.8384 µs]
+                        thrpt:  [167.96 MiB/s 169.37 MiB/s 170.29 MiB/s]
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) high mild
+  2 (10.00%) high severe
+Benchmarking yaml/small/parse
+Benchmarking yaml/small/parse: Warming up for 300.00 ms
+Benchmarking yaml/small/parse: Collecting 20 samples in estimated 800.66 ms (32k iterations)
+Benchmarking yaml/small/parse: Analyzing
+yaml/small/parse        time:   [25.366 µs 25.904 µs 26.554 µs]
+                        thrpt:  [24.278 MiB/s 24.888 MiB/s 25.415 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+Benchmarking yaml/small/load
+Benchmarking yaml/small/load: Warming up for 300.00 ms
+Benchmarking yaml/small/load: Collecting 20 samples in estimated 801.92 ms (26k iterations)
+Benchmarking yaml/small/load: Analyzing
+yaml/small/load         time:   [30.942 µs 31.356 µs 31.727 µs]
+                        thrpt:  [20.320 MiB/s 20.560 MiB/s 20.835 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking yaml/small/build
+Benchmarking yaml/small/build: Warming up for 300.00 ms
+Benchmarking yaml/small/build: Collecting 20 samples in estimated 804.64 ms (17k iterations)
+Benchmarking yaml/small/build: Analyzing
+yaml/small/build        time:   [46.930 µs 47.652 µs 48.452 µs]
+                        thrpt:  [13.305 MiB/s 13.529 MiB/s 13.737 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking yaml/small/refresh
+Benchmarking yaml/small/refresh: Warming up for 300.00 ms
+Benchmarking yaml/small/refresh: Collecting 20 samples in estimated 808.83 ms (16k iterations)
+Benchmarking yaml/small/refresh: Analyzing
+yaml/small/refresh      time:   [51.185 µs 51.899 µs 52.869 µs]
+Found 3 outliers among 20 measurements (15.00%)
+  3 (15.00%) high severe
+Benchmarking yaml/small/refresh-unchanged
+Benchmarking yaml/small/refresh-unchanged: Warming up for 300.00 ms
+Benchmarking yaml/small/refresh-unchanged: Collecting 20 samples in estimated 800.53 ms (193k iterations)
+Benchmarking yaml/small/refresh-unchanged: Analyzing
+yaml/small/refresh-unchanged
+                        time:   [4.1284 µs 4.1512 µs 4.1801 µs]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+
+Benchmarking yaml/realistic/read
+Benchmarking yaml/realistic/read: Warming up for 300.00 ms
+Benchmarking yaml/realistic/read: Collecting 20 samples in estimated 800.73 ms (145k iterations)
+Benchmarking yaml/realistic/read: Analyzing
+yaml/realistic/read     time:   [5.5089 µs 5.5531 µs 5.6037 µs]
+                        thrpt:  [4.3715 GiB/s 4.4114 GiB/s 4.4467 GiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking yaml/realistic/parse
+Benchmarking yaml/realistic/parse: Warming up for 300.00 ms
+Benchmarking yaml/realistic/parse: Collecting 20 samples in estimated 955.55 ms (1050 iterations)
+Benchmarking yaml/realistic/parse: Analyzing
+yaml/realistic/parse    time:   [905.25 µs 909.75 µs 915.58 µs]
+                        thrpt:  [27.398 MiB/s 27.573 MiB/s 27.710 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking yaml/realistic/load
+Benchmarking yaml/realistic/load: Warming up for 300.00 ms
+Benchmarking yaml/realistic/load: Collecting 20 samples in estimated 916.84 ms (840 iterations)
+Benchmarking yaml/realistic/load: Analyzing
+yaml/realistic/load     time:   [1.0733 ms 1.0842 ms 1.0966 ms]
+                        thrpt:  [22.876 MiB/s 23.135 MiB/s 23.372 MiB/s]
+Benchmarking yaml/realistic/build
+Benchmarking yaml/realistic/build: Warming up for 300.00 ms
+Benchmarking yaml/realistic/build: Collecting 20 samples in estimated 1.1233 s (630 iterations)
+Benchmarking yaml/realistic/build: Analyzing
+yaml/realistic/build    time:   [1.7663 ms 1.7915 ms 1.8234 ms]
+                        thrpt:  [13.757 MiB/s 14.002 MiB/s 14.202 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking yaml/realistic/refresh
+Benchmarking yaml/realistic/refresh: Warming up for 300.00 ms
+Benchmarking yaml/realistic/refresh: Collecting 20 samples in estimated 1.1526 s (630 iterations)
+Benchmarking yaml/realistic/refresh: Analyzing
+yaml/realistic/refresh  time:   [1.8043 ms 1.8211 ms 1.8390 ms]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking yaml/realistic/refresh-unchanged
+Benchmarking yaml/realistic/refresh-unchanged: Warming up for 300.00 ms
+Benchmarking yaml/realistic/refresh-unchanged: Collecting 20 samples in estimated 803.77 ms (25k iterations)
+Benchmarking yaml/realistic/refresh-unchanged: Analyzing
+yaml/realistic/refresh-unchanged
+                        time:   [31.684 µs 31.901 µs 32.134 µs]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking ini/small/read
+Benchmarking ini/small/read: Warming up for 300.00 ms
+Benchmarking ini/small/read: Collecting 20 samples in estimated 800.43 ms (211k iterations)
+Benchmarking ini/small/read: Analyzing
+ini/small/read          time:   [3.7936 µs 3.8261 µs 3.8621 µs]
+                        thrpt:  [152.60 MiB/s 154.04 MiB/s 155.36 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking ini/small/load
+Benchmarking ini/small/load: Warming up for 300.00 ms
+Benchmarking ini/small/load: Collecting 20 samples in estimated 800.05 ms (79k iterations)
+Benchmarking ini/small/load: Analyzing
+ini/small/load          time:   [10.223 µs 10.628 µs 11.268 µs]
+                        thrpt:  [52.304 MiB/s 55.455 MiB/s 57.652 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking ini/small/build
+Benchmarking ini/small/build: Warming up for 300.00 ms
+Benchmarking ini/small/build: Collecting 20 samples in estimated 800.63 ms (36k iterations)
+Benchmarking ini/small/build: Analyzing
+ini/small/build         time:   [20.925 µs 21.789 µs 23.245 µs]
+                        thrpt:  [25.355 MiB/s 27.049 MiB/s 28.166 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking ini/small/refresh
+Benchmarking ini/small/refresh: Warming up for 300.00 ms
+Benchmarking ini/small/refresh: Collecting 20 samples in estimated 805.53 ms (30k iterations)
+Benchmarking ini/small/refresh: Analyzing
+ini/small/refresh       time:   [27.152 µs 27.478 µs 27.843 µs]
+Benchmarking ini/small/refresh-unchanged
+Benchmarking ini/small/refresh-unchanged: Warming up for 300.00 ms
+Benchmarking ini/small/refresh-unchanged: Collecting 20 samples in estimated 800.46 ms (194k iterations)
+Benchmarking ini/small/refresh-unchanged: Analyzing
+ini/small/refresh-unchanged
+                        time:   [4.0430 µs 4.0770 µs 4.1249 µs]
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking ini/realistic/read
+Benchmarking ini/realistic/read: Warming up for 300.00 ms
+Benchmarking ini/realistic/read: Collecting 20 samples in estimated 800.23 ms (148k iterations)
+Benchmarking ini/realistic/read: Analyzing
+ini/realistic/read      time:   [5.3733 µs 5.4151 µs 5.4615 µs]
+                        thrpt:  [3.7950 GiB/s 3.8276 GiB/s 3.8573 GiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking ini/realistic/load
+Benchmarking ini/realistic/load: Warming up for 300.00 ms
+Benchmarking ini/realistic/load: Collecting 20 samples in estimated 822.82 ms (2310 iterations)
+Benchmarking ini/realistic/load: Analyzing
+ini/realistic/load      time:   [361.99 µs 388.88 µs 439.57 µs]
+                        thrpt:  [48.283 MiB/s 54.578 MiB/s 58.632 MiB/s]
+Benchmarking ini/realistic/build
+Benchmarking ini/realistic/build: Warming up for 300.00 ms
+Benchmarking ini/realistic/build: Collecting 20 samples in estimated 871.39 ms (1050 iterations)
+Benchmarking ini/realistic/build: Analyzing
+ini/realistic/build     time:   [811.93 µs 818.06 µs 827.78 µs]
+                        thrpt:  [25.640 MiB/s 25.944 MiB/s 26.140 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+
+Benchmarking ini/realistic/refresh
+Benchmarking ini/realistic/refresh: Warming up for 300.00 ms
+Benchmarking ini/realistic/refresh: Collecting 20 samples in estimated 931.02 ms (1050 iterations)
+Benchmarking ini/realistic/refresh: Analyzing
+ini/realistic/refresh   time:   [888.67 µs 891.71 µs 894.93 µs]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+Benchmarking ini/realistic/refresh-unchanged
+Benchmarking ini/realistic/refresh-unchanged: Warming up for 300.00 ms
+Benchmarking ini/realistic/refresh-unchanged: Collecting 20 samples in estimated 804.47 ms (29k iterations)
+Benchmarking ini/realistic/refresh-unchanged: Analyzing
+ini/realistic/refresh-unchanged
+                        time:   [27.328 µs 27.505 µs 27.646 µs]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking dotenv/small/read
+Benchmarking dotenv/small/read: Warming up for 300.00 ms
+Benchmarking dotenv/small/read: Collecting 20 samples in estimated 800.48 ms (210k iterations)
+Benchmarking dotenv/small/read: Analyzing
+dotenv/small/read       time:   [3.8146 µs 3.8481 µs 3.8841 µs]
+                        thrpt:  [227.36 MiB/s 229.49 MiB/s 231.50 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking dotenv/small/parse
+Benchmarking dotenv/small/parse: Warming up for 300.00 ms
+Benchmarking dotenv/small/parse: Collecting 20 samples in estimated 801.19 ms (94k iterations)
+Benchmarking dotenv/small/parse: Analyzing
+dotenv/small/parse      time:   [8.3223 µs 8.5015 µs 8.7504 µs]
+                        thrpt:  [100.92 MiB/s 103.88 MiB/s 106.11 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking dotenv/small/load
+Benchmarking dotenv/small/load: Warming up for 300.00 ms
+Benchmarking dotenv/small/load: Collecting 20 samples in estimated 801.78 ms (24k iterations)
+Benchmarking dotenv/small/load: Analyzing
+dotenv/small/load       time:   [33.090 µs 33.409 µs 33.712 µs]
+                        thrpt:  [26.195 MiB/s 26.433 MiB/s 26.688 MiB/s]
+Benchmarking dotenv/small/build
+Benchmarking dotenv/small/build: Warming up for 300.00 ms
+Benchmarking dotenv/small/build: Collecting 20 samples in estimated 808.36 ms (17k iterations)
+Benchmarking dotenv/small/build: Analyzing
+dotenv/small/build      time:   [47.196 µs 48.784 µs 50.794 µs]
+                        thrpt:  [17.386 MiB/s 18.102 MiB/s 18.711 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+
+Benchmarking dotenv/small/refresh
+Benchmarking dotenv/small/refresh: Warming up for 300.00 ms
+Benchmarking dotenv/small/refresh: Collecting 20 samples in estimated 804.23 ms (15k iterations)
+Benchmarking dotenv/small/refresh: Analyzing
+dotenv/small/refresh    time:   [53.903 µs 55.010 µs 56.207 µs]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking dotenv/small/refresh-unchanged
+Benchmarking dotenv/small/refresh-unchanged: Warming up for 300.00 ms
+Benchmarking dotenv/small/refresh-unchanged: Collecting 20 samples in estimated 800.88 ms (179k iterations)
+Benchmarking dotenv/small/refresh-unchanged: Analyzing
+dotenv/small/refresh-unchanged
+                        time:   [4.4286 µs 4.4856 µs 4.5609 µs]
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) high mild
+  2 (10.00%) high severe
+
+Benchmarking dotenv/realistic/read
+Benchmarking dotenv/realistic/read: Warming up for 300.00 ms
+Benchmarking dotenv/realistic/read: Collecting 20 samples in estimated 801.50 ms (111k iterations)
+Benchmarking dotenv/realistic/read: Analyzing
+dotenv/realistic/read   time:   [6.9944 µs 7.1768 µs 7.5124 µs]
+                        thrpt:  [5.6237 GiB/s 5.8867 GiB/s 6.0402 GiB/s]
+Benchmarking dotenv/realistic/parse
+Benchmarking dotenv/realistic/parse: Warming up for 300.00 ms
+Benchmarking dotenv/realistic/parse: Collecting 20 samples in estimated 817.85 ms (2100 iterations)
+Benchmarking dotenv/realistic/parse: Analyzing
+dotenv/realistic/parse  time:   [386.75 µs 391.64 µs 398.26 µs]
+                        thrpt:  [108.63 MiB/s 110.46 MiB/s 111.86 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking dotenv/realistic/load
+Benchmarking dotenv/realistic/load: Warming up for 300.00 ms
+Benchmarking dotenv/realistic/load: Collecting 20 samples in estimated 904.83 ms (630 iterations)
+Benchmarking dotenv/realistic/load: Analyzing
+dotenv/realistic/load   time:   [1.4109 ms 1.4277 ms 1.4543 ms]
+                        thrpt:  [29.747 MiB/s 30.301 MiB/s 30.661 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking dotenv/realistic/build
+Benchmarking dotenv/realistic/build: Warming up for 300.00 ms
+Benchmarking dotenv/realistic/build: Collecting 20 samples in estimated 915.88 ms (420 iterations)
+Benchmarking dotenv/realistic/build: Analyzing
+dotenv/realistic/build  time:   [2.0754 ms 2.0971 ms 2.1236 ms]
+                        thrpt:  [20.372 MiB/s 20.629 MiB/s 20.845 MiB/s]
+
+Benchmarking dotenv/realistic/refresh
+Benchmarking dotenv/realistic/refresh: Warming up for 300.00 ms
+Benchmarking dotenv/realistic/refresh: Collecting 20 samples in estimated 913.41 ms (420 iterations)
+Benchmarking dotenv/realistic/refresh: Analyzing
+dotenv/realistic/refresh
+                        time:   [2.1981 ms 2.2508 ms 2.3280 ms]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking dotenv/realistic/refresh-unchanged
+Benchmarking dotenv/realistic/refresh-unchanged: Warming up for 300.00 ms
+Benchmarking dotenv/realistic/refresh-unchanged: Collecting 20 samples in estimated 807.97 ms (15k iterations)
+Benchmarking dotenv/realistic/refresh-unchanged: Analyzing
+dotenv/realistic/refresh-unchanged
+                        time:   [52.554 µs 52.788 µs 53.048 µs]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+

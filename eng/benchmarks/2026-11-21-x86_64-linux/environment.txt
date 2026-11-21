@@ -1,4 +1,4 @@
-Recorded: 2026-11-21, local time UTC-06:00 (runs started 16:47, 16:52, 16:53, 16:55)
+Recorded: 2026-11-21, local time UTC-06:00 (runs started 16:47, 16:52, 16:53, 16:55; run 4 at 17:08)
 Kernel: Linux 7.2.15-1-omarchy x86_64
 Distribution: Omarchy (Arch Linux), BUILD_ID 4.5.0
 CPU: Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz
@@ -18,3 +18,9 @@ Commands:
   taskset -c 2 cargo bench -p neotales-config --all-features --bench sources -- --sample-size 20 --warm-up-time 0.3 --measurement-time 0.8
   rm -rf target/criterion
   taskset -c 2 cargo bench -p neotales-config-keepass --all-features --bench keepass -- --sample-size 20 --warm-up-time 0.3 --measurement-time 0.8
+
+Run 4 (config-run4.txt, keepass-run4.txt) was taken after the timed reload closures were changed to
+assert RefreshOutcome::Unchanged. The commands and settings are the same as above. Only the reload
+groups differ in code; their figures are the ones tabulated in config/docs/benchmarks.md, while the
+other groups in run 4 are kept in the raw log but not used for the tables.
+

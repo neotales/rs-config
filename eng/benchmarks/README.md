@@ -13,3 +13,6 @@ Each dated directory contains:
 The runs are observations on one host. Read `config/docs/benchmarks.md` for what each phase means,
 the fixture shapes, and the listed limitations. Do not compare figures across machines or toolchains
 without rerunning the suite there.
+
+`config-run4.txt` and `keepass-run4.txt` were taken after the timed reload closures were changed to
+assert `RefreshOutcome::Unchanged`; `config/docs/benchmarks.md` names which tables use run 4.

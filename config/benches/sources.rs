@@ -127,6 +127,11 @@ fn run_case(
 }
 
 /// Runs the reload phases for one provider using the generic `Builder::source`.
+///
+/// The fixture is never modified, so every timed closure must return
+/// [`neotales_config::RefreshOutcome::Unchanged`]. The assertion is inside the
+/// closure: a failed refresh, or a reload that silently produced a different
+/// snapshot, fails the benchmark instead of being recorded as a refresh time.
 #[cfg(all(
     feature = "reload",
     any(
@@ -151,14 +156,25 @@ where
 
     let mut group = criterion.benchmark_group(format!("{provider}/{}", size.label()));
 
-    // Read, parse, merge, compare, and publish. This is the manual refresh path.
+    // Unchanged-snapshot refresh: fingerprint, reload, merge, and compare.
+    // The fixture does not change, so the outcome is `Unchanged` and nothing
+    // is published. Changed-snapshot publication is not measured here.
     group.bench_function("refresh", |bencher| {
-        bencher.iter(|| black_box(reload.refresh()));
+        bencher.iter(|| {
+            let outcome = reload.refresh();
+            assert_eq!(outcome, neotales_config::RefreshOutcome::Unchanged);
+            black_box(outcome);
+        });
     });
 
-    // The polling path over an unchanged file: fingerprint only, no load.
+    // The polling path over an unchanged file: fingerprint and compare only,
+    // with no source load and no publication.
     group.bench_function("refresh-unchanged", |bencher| {
-        bencher.iter(|| black_box(reload.refresh_if_changed()));
+        bencher.iter(|| {
+            let outcome = reload.refresh_if_changed();
+            assert_eq!(outcome, neotales_config::RefreshOutcome::Unchanged);
+            black_box(outcome);
+        });
     });
 
     group.finish();

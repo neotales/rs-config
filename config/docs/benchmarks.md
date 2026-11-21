@@ -19,8 +19,8 @@ reachable without adding public API.
 | `parse` | The parser crate's own public API on text that is already in memory | Isolates the dialect parser from the read and from the provider's conversion. Not present for INI. |
 | `load` | The published `Source::load` | Read, decode, parse, exact-number handling where the format has it, and conversion into `Value`. |
 | `build` | `Builder::build` with the file source and a small in-memory overlay | Adds the recursive merge and per-node provenance to `load`. |
-| `refresh` | `Reload::refresh` | Reloads every source, merges, compares, and publishes. Requires `reload`. |
-| `refresh-unchanged` | `Reload::refresh_if_changed` on an unchanged file | The polling path: fingerprint the watched file and skip the load. Requires `reload`. |
+| `refresh` | `Reload::refresh` on the unchanged fixture | Captures the watched-file fingerprint, reloads every source, merges, and compares the result with the published snapshot. The fixture does not change, so the outcome is `Unchanged`: this measures reload, merge, and compare, and publishes nothing. Changed-snapshot publication is not measured. Requires `reload`. |
+| `refresh-unchanged` | `Reload::refresh_if_changed` on an unchanged file | The polling path: fingerprints the watched file, compares it with the previous baseline, and skips the load. Returns `Unchanged`. Requires `reload`. |
 
 The in-memory groups are the merge baseline:
 
@@ -77,29 +77,35 @@ module, or a KDBX fixture.
 
 ## Fixtures
 
-`config/benches/support/mod.rs` renders one logical configuration into every dialect from fixed
-integer formulas. There is no randomness, no clock input, and no file outside the temporary
-directory. Every value is synthetic and non-secret: loopback hosts, `fixture`-style names, and a
-database URL with a user but no password.
+`config/benches/support/mod.rs` renders the same service rows and logical field values into every
+dialect, where the dialect can express them, from fixed integer formulas. There is no randomness, no
+clock input, and no file outside the temporary directory. Every value is synthetic and non-secret:
+loopback hosts, `fixture`-style names, and a database URL with a user but no password.
 
 | Size | Services | JSON | JSON5 | JSONC | TOML | YAML | INI | dotenv |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `small` | 1 | 672 B | 685 B | 757 B | 648 B | 676 B | 618 B | 926 B |
 | `realistic` | 96 | 25,634 B | 23,557 B | 27,999 B | 23,615 B | 26,303 B | 22,255 B | 45,363 B |
 
-The documents share the same shape: a small root (`service`, `http`, `database`, `logging`, `ratio`,
-`large`) and a map of 96 service rows with twelve fields each. The dialects differ in what they can
-express:
+The documents are generated from the same logical model: a small root (`root_name`, `service`,
+`http`, `database`, `logging`, `ratio`, `large`) and one or 96 service rows with twelve fields each.
+They are not identical documents. The dialects differ in what they can express, so the cross-format
+figures compare work on similarly sized documents, not the same input:
 
 - INI values are always strings, and a section name such as `[http.timeouts]` is one literal key,
   not a nested map. The INI document therefore exercises the same line volume through a flatter
   value shape.
 - dotenv values are always strings and are read through `DotenvFile::prefix("APP_")` with `.` as the
-  key separator. The document has no `${...}` references; the expansion pass still runs.
+  key separator. The document has no `${...}` references; the expansion pass still runs. INI and
+  dotenv cannot express the service `targets` array at all.
 - JSON5 uses unquoted names, single quotes, hexadecimal ports, and a leading-decimal ratio. JSONC
   adds comments only. The logical values match JSON.
 - TOML uses `[services.service_00]` tables and a `large` value at `i64::MAX`. YAML uses the YAML 1.2
   core schema and nested block mappings.
+
+The shared formulas keep fixture differences from being the main variable, but they do not make the
+fixtures identical. A format's line or byte volume, its value shape, and the conversion it needs
+still differ, and those differences are part of what each row measures.
 
 `keepass/benches/support/mod.rs` generates KDBX 4.1 fixtures in a temporary directory:
 
@@ -169,15 +175,21 @@ before a run removes the `change:` comparison against earlier data.
 Three independent runs of each suite were taken. Run 2 overlapped a period of heavy activity from
 other sessions on the same host and is included only in the variability section; its multi-fold
 outliers are not a property of the code. Runs 1 and 3 were used for the primary observation, and
-run 3 is tabulated below because its within-run ordering was the most consistent. Even between
-runs 1 and 3, several small-operation groups moved by 20–80%, and one `jsonc` group in run 1 was
-about five times slower than run 3.
+run 3 is tabulated for the non-reload groups because its within-run ordering was the most
+consistent. Even between runs 1 and 3, several small-operation groups moved by 20–80%, and one
+`jsonc` group in run 1 was about five times slower than run 3.
+
+A fourth run of each suite was taken after the `RefreshOutcome::Unchanged` assertions were added to
+the timed reload closures. Only the reload groups changed in code, so those tables use run 4. Run
+4's other groups are in the raw log but are not used for the other tables.
 
 ## Observed results
 
-These are Criterion point estimates with its 95% confidence interval for the mean of that run. The
-interval describes the estimate under the run's conditions, not the spread between runs. Times below
-100 µs are printed with two decimals and should be read as approximate; the process and timer
+These are Criterion's typical estimates for the run: the slope of its per-iteration fit when it has
+one, otherwise the mean. The bracketed values are the 95% confidence interval Criterion prints for
+that same estimate, so when a slope is available they are not a confidence interval for the mean.
+The interval describes the estimate under the run's conditions, not the spread between runs. Times
+below 100 µs are printed with two decimals and should be read as approximate; the process and timer
 overhead is a meaningful fraction of such a measurement.
 
 ### Small size (one service)
@@ -218,34 +230,46 @@ is why a file `build` is roughly its `load` plus several hundred microseconds on
 
 ### Reload
 
-Small size:
+Small size (run 4, post-assertion):
 
 | Provider | `refresh` | `refresh-unchanged` |
 | --- | --- | --- |
-| JSON | 26.7 µs [26.6–26.9] | 4.07 µs [4.02–4.16] |
-| JSON5 | 34.0 µs [33.4–35.0] | 4.14 µs [4.10–4.21] |
-| JSONC | 32.3 µs [32.2–32.5] | 4.28 µs [4.25–4.31] |
-| TOML | 46.2 µs [45.2–47.6] | 4.12 µs [4.08–4.16] |
-| YAML | 50.9 µs [50.5–51.5] | 4.23 µs [4.19–4.29] |
-| INI | 26.6 µs [26.3–26.9] | 4.07 µs [4.04–4.11] |
-| dotenv | 53.5 µs [52.8–54.3] | 4.38 µs [4.36–4.40] |
+| JSON | 29.0 µs [28.4–29.9] | 4.05 µs [4.03–4.08] |
+| JSON5 | 34.6 µs [34.1–35.0] | 4.15 µs [4.11–4.20] |
+| JSONC | 33.2 µs [32.9–33.6] | 4.25 µs [4.22–4.28] |
+| TOML | 45.5 µs [44.2–47.3] | 4.05 µs [4.02–4.09] |
+| YAML | 51.9 µs [51.2–52.9] | 4.15 µs [4.13–4.18] |
+| INI | 27.5 µs [27.2–27.8] | 4.08 µs [4.04–4.12] |
+| dotenv | 55.0 µs [53.9–56.2] | 4.49 µs [4.43–4.56] |
 
-Realistic size:
+Realistic size (run 4, post-assertion):
 
 | Provider | `refresh` | `refresh-unchanged` |
 | --- | --- | --- |
-| JSON | 1.03 ms [0.96–1.11] | 31.4 µs [31.1–31.7] |
-| JSON5 | 1.17 ms [1.15–1.19] | 29.1 µs [28.9–29.2] |
-| JSONC | 1.16 ms [1.14–1.18] | 33.9 µs [33.7–34.1] |
-| TOML | 1.60 ms [1.56–1.65] | 29.1 µs [28.9–29.4] |
-| YAML | 1.79 ms [1.78–1.81] | 31.8 µs [31.5–32.1] |
-| INI | 976 µs [904–1097] | 27.5 µs [27.4–27.7] |
-| dotenv | 2.17 ms [2.15–2.20] | 52.3 µs [52.0–52.6] |
+| JSON | 980 µs [971–990] | 31.4 µs [31.2–31.6] |
+| JSON5 | 1.17 ms [1.16–1.18] | 29.0 µs [28.9–29.2] |
+| JSONC | 1.20 ms [1.19–1.22] | 34.5 µs [34.2–34.7] |
+| TOML | 1.71 ms [1.62–1.87] | 29.1 µs [28.9–29.4] |
+| YAML | 1.82 ms [1.80–1.84] | 31.9 µs [31.7–32.1] |
+| INI | 892 µs [889–895] | 27.5 µs [27.3–27.6] |
+| dotenv | 2.25 ms [2.20–2.33] | 52.8 µs [52.6–53.0] |
 
-The unchanged poll is the fingerprint of one file and no source load; it is roughly 30–50 µs here.
-The full `refresh` is close to a fresh `build`, as expected.
+Both `refresh` groups use an unchanged fixture. `Reload::refresh` fingerprints the watched file,
+reloads and merges every source, then compares the candidate with the published snapshot; because
+the file did not change, it returns `RefreshOutcome::Unchanged` and publishes nothing. The timed
+closure asserts that outcome, so a failed refresh or a silently different snapshot fails the
+benchmark instead of being recorded as a timing. The group therefore measures the unchanged-refresh
+path, including the fingerprint and the load, merge, and comparison, and does **not** measure the
+changed-snapshot publish path or subscriber notification. The `refresh-unchanged` group is the
+polling path: it fingerprints the file, compares the fingerprint with the previous baseline, and
+returns `Unchanged` without loading any source.
+
+The full `refresh` is close to a fresh `build` plus the fingerprint and comparison, as expected.
 
 ### KeePass
+
+The reload rows are from run 4, after the outcome assertions were added; the other rows are from
+run 3 and their code paths were not changed.
 
 | Vault | Phase | Time |
 | --- | --- | --- |
@@ -253,30 +277,38 @@ The full `refresh` is close to a fresh `build`, as expected.
 | `small` | `codec-load` | 71.9 µs [71.2–72.5] |
 | `small` | `load` | 78.5 µs [77.7–79.6] |
 | `small` | `build` | 87.6 µs [86.5–89.7] |
-| `small` | `refresh` | 92.8 µs [92.0–93.5] |
-| `small` | `refresh-unchanged` | 7.05 µs [6.99–7.12] |
+| `small` | `refresh` | 91.9 µs [91.1–92.9] |
+| `small` | `refresh-unchanged` | 7.37 µs [7.01–7.68] |
 | `realistic` (48 entries, KDF 8) | `read` | 3.94 µs [3.92–3.97] |
 | `realistic` | `codec-load` | 1.05 ms [1.03–1.07] |
 | `realistic` | `load` | 1.38 ms [1.37–1.40] |
 | `realistic` | `build` | 1.55 ms [1.54–1.56] |
-| `realistic` | `refresh` | 1.58 ms [1.57–1.60] |
-| `realistic` | `refresh-unchanged` | 11.4 µs [11.3–11.5] |
+| `realistic` | `refresh` | 1.60 ms [1.57–1.62] |
+| `realistic` | `refresh-unchanged` | 11.4 µs [11.3–11.4] |
 | `realistic-kdf-600000` (48 entries, KDF 600,000) | `read` | 3.97 µs [3.94–4.02] |
 | `realistic-kdf-600000` | `codec-load` | 12.25 ms [12.20–12.30] |
 | `realistic-kdf-600000` | `load` | 12.68 ms [12.60–12.82] |
 | `realistic-kdf-600000` | `build` | 12.92 ms [12.79–13.03] |
-| `realistic-kdf-600000` | `refresh` | 13.07 ms [12.93–13.25] |
-| `realistic-kdf-600000` | `refresh-unchanged` | 11.4 µs [11.3–11.4] |
+| `realistic-kdf-600000` | `refresh` | 12.83 ms [12.77–12.90] |
+| `realistic-kdf-600000` | `refresh-unchanged` | 11.5 µs [11.4–11.5] |
 
 `codec-load` is `KdbxFile::load` only: open, KDF, decrypt, decompress, and parse the KDBX XML into
 the codec's document. `load` adds the provider's explicit mapping of 288 entry fields. At the
 sample KDF cost the mapping is visible; at the codec's default 600,000 AES-KDF rounds, key
-derivation is about 12 ms and dominates everything the provider adds. The unchanged reload poll is
-still microseconds because it only fingerprints the file, and deliberately does not load the vault.
+derivation is about 12 ms and dominates everything the provider adds.
+
+The `refresh` group also uses the unchanged vault. It reloads and maps the vault (including key
+derivation), merges, and compares the result with the published snapshot, returning
+`RefreshOutcome::Unchanged` without publishing. The timed closure asserts that outcome, so a failed
+or changed reload fails the benchmark rather than producing a failure timing. The
+`refresh-unchanged` poll is still microseconds because it only fingerprints the file, compares the
+fingerprint, and deliberately does not load the vault. The changed-vault publish path is not
+measured.
 
 ## Variability
 
-Three runs of each suite, point estimates in ms, for the realistic `load` and `build` groups:
+Three runs of each suite, reported typical estimates in ms, for the realistic `load` and `build`
+groups:
 
 | Provider | load run 1 | load run 2 | load run 3 | build run 1 | build run 2 | build run 3 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -318,8 +350,10 @@ run 2, which is consistent with that caveat even though the KDF dominates both.
 - **The parser-only baselines are not the provider's exact code.** JSON5 is parsed into a generic
   `serde_json::Value`; YAML is parsed by `saphyr`'s document model while the provider drives
   `saphyr-parser` event by event; JSONC uses the provider's option set but not its conversion; TOML
-  uses the crate's native value. A parser baseline therefore bounds the dialect cost from below in
-  a different value shape, not from exactly the same code.
+  uses the crate's native value. Each parser baseline is an independent comparator in a different
+  value shape, not the provider's code path. It therefore neither isolates exactly the parse stage
+  the provider runs nor bounds the provider's cost from below: the two do different work, in either
+  direction.
 - **INI has no public parser-only baseline.** Its `load` is read + private parse + convert. The
   difference between `load` and `read` is not a pure parse measurement.
 - **The dotenv `parse` baseline excludes expansion and key mapping.** `load` also walks the process
@@ -336,9 +370,10 @@ run 2, which is consistent with that caveat even though the KDF dominates both.
 - **No HTTP, environment, arguments, or typed-read benchmarks.** `Environment`, `Arguments`, the
   typed `get` path, and the watcher thread are out of this suite. The in-memory baseline isolates
   the merge, not a deserialization target.
-- **Criterion's confidence interval is within a run.** It does not include the between-run
-  variability shown above. Do not read a non-overlapping interval in one run as a significant
-  difference on this host.
+- **Criterion's confidence interval is within a run and belongs to the typical estimate.** It is the
+  interval for the slope when Criterion has one, otherwise for the mean. It does not include the
+  between-run variability shown above. Do not read a non-overlapping interval in one run as a
+  significant difference on this host.
 
 ## KeePass fixture creation without a secret
 
@@ -364,11 +399,11 @@ given real vault chose, which is a deployment property rather than a fixture pro
 
 ## Raw output
 
-The full Criterion logs for all three runs are in
+The full Criterion logs for all four runs are in
 `eng/benchmarks/2026-11-21-x86_64-linux/`:
 
-- `config-run1.txt`, `config-run2.txt`, `config-run3.txt`
-- `keepass-run1.txt`, `keepass-run2.txt`, `keepass-run3.txt`
+- `config-run1.txt`, `config-run2.txt`, `config-run3.txt`, `config-run4.txt`
+- `keepass-run1.txt`, `keepass-run2.txt`, `keepass-run3.txt`, `keepass-run4.txt`
 - `environment.txt`
 
 They are outside the crate directories, so they are part of this repository but never part of a
