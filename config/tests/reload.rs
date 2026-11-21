@@ -348,9 +348,17 @@ fn reload_debug_reports_no_value() {
 
 #[cfg(feature = "toml")]
 mod toml_file {
-    use std::{fs, path::PathBuf, time::Duration};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicI64, Ordering},
+        },
+        time::Duration,
+    };
 
-    use neotales_config::{Builder, RefreshOutcome, TomlFile, WatchError};
+    use neotales_config::{Builder, RefreshOutcome, SourceError, TomlFile, Value, WatchError};
 
     use super::TIMEOUT;
 
@@ -391,9 +399,10 @@ mod toml_file {
         assert_eq!(current.origin("http.port").unwrap(), "app");
         assert_eq!(before.get::<u16>("http.port").unwrap(), 8080);
 
-        // The same failed bytes are not retried on every poll.
-        assert_eq!(reload.refresh_if_changed(), RefreshOutcome::Unchanged);
+        // A pending failure is retried on the next poll even though the bytes did not change.
+        assert!(reload.refresh_if_changed().is_failed());
         assert!(reload.last_error().is_some());
+        assert_eq!(reload.config().get::<u16>("http.port").unwrap(), 8080);
 
         // Recovery needs only a content change; no second metadata change is required.
         fs::write(&path, "[http]\nport = 9090\n").unwrap();
@@ -404,6 +413,99 @@ mod toml_file {
         assert_eq!(current.get::<u16>("http.port").unwrap(), 9090);
         assert_eq!(current.origin("http.port").unwrap(), "app");
         assert_eq!(before.get::<u16>("http.port").unwrap(), 8080);
+    }
+
+    #[test]
+    fn a_pending_failure_from_another_source_retries_without_a_file_change() {
+        let (_directory, path) = fixture("[http]\nport = 8080\n");
+        let file_before = fs::read(&path).unwrap();
+        let available = Arc::new(AtomicBool::new(true));
+        let counter = Arc::new(AtomicI64::new(10));
+        let source_available = Arc::clone(&available);
+        let source_counter = Arc::clone(&counter);
+        let reload = Builder::new()
+            .toml_file("app", TomlFile::new(&path))
+            .source("flaky", move || {
+                if !source_available.load(Ordering::SeqCst) {
+                    return Err(SourceError::unavailable());
+                }
+                Ok(Value::map([(
+                    "flaky",
+                    Value::from(source_counter.load(Ordering::SeqCst)),
+                )]))
+            })
+            .build_reloadable()
+            .expect("the fixture builds");
+        assert_eq!(reload.config().get::<i64>("flaky").unwrap(), 10);
+        assert_eq!(reload.watched_path_count(), 1);
+
+        // A manual refresh makes the other source's transient failure pending.
+        available.store(false, Ordering::SeqCst);
+        assert!(reload.refresh().is_failed());
+        assert!(reload.last_error().is_some());
+        // The last good value and its provenance remain published.
+        assert_eq!(reload.config().get::<u16>("http.port").unwrap(), 8080);
+        assert_eq!(reload.config().get::<i64>("flaky").unwrap(), 10);
+        assert_eq!(reload.generation(), 0);
+
+        // The watched bytes and metadata are untouched, yet the pending failure is retried
+        // instead of being reported as an unchanged poll.
+        assert_eq!(fs::read(&path).unwrap(), file_before);
+        assert!(reload.refresh_if_changed().is_failed());
+
+        // Recovery needs no second file write: the other source becomes available again.
+        counter.store(20, Ordering::SeqCst);
+        available.store(true, Ordering::SeqCst);
+        assert_eq!(reload.refresh_if_changed(), RefreshOutcome::Reloaded);
+        assert_eq!(reload.last_error(), None);
+        assert_eq!(reload.config().get::<i64>("flaky").unwrap(), 20);
+        assert_eq!(fs::read(&path).unwrap(), file_before);
+    }
+
+    #[test]
+    fn a_watcher_retries_a_failed_source_without_a_file_change() {
+        let (_directory, path) = fixture("[http]\nport = 8080\n");
+        let available = Arc::new(AtomicBool::new(true));
+        let counter = Arc::new(AtomicI64::new(10));
+        let source_available = Arc::clone(&available);
+        let source_counter = Arc::clone(&counter);
+        let reload = Builder::new()
+            .toml_file("app", TomlFile::new(&path))
+            .source("flaky", move || {
+                if !source_available.load(Ordering::SeqCst) {
+                    return Err(SourceError::unavailable());
+                }
+                Ok(Value::map([(
+                    "flaky",
+                    Value::from(source_counter.load(Ordering::SeqCst)),
+                )]))
+            })
+            .build_reloadable()
+            .expect("the fixture builds");
+
+        // Fail once explicitly so the reload is pending before the watcher starts.
+        available.store(false, Ordering::SeqCst);
+        assert!(reload.refresh().is_failed());
+        assert!(reload.last_error().is_some());
+
+        let watcher = reload
+            .start_watching(Duration::from_millis(10))
+            .expect("a file source is watchable");
+
+        // No file write: the poller retries the pending failure and recovers from the source.
+        counter.store(20, Ordering::SeqCst);
+        available.store(true, Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + TIMEOUT;
+        while reload.config().get::<i64>("flaky").unwrap() != 20 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the watcher did not retry the pending failure"
+            );
+            std::thread::yield_now();
+        }
+        watcher.stop();
+        assert_eq!(reload.last_error(), None);
+        assert_eq!(reload.config().get::<u16>("http.port").unwrap(), 8080);
     }
 
     #[test]

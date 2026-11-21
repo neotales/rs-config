@@ -92,7 +92,7 @@ impl Deferred {
 ///
 /// Register one with [`crate::Builder::source`]. [`Source::load`] returns a complete value tree
 /// whose root is a [`Value::Map`]; any other root fails the build. A source is loaded once, in
-/// registration order, for one snapshot. A [`crate::Reload`] built from the same builder loads
+/// registration order, for one snapshot. A `Reload` holder built from the same builder loads
 /// every source again on each refresh; the core [`crate::Config`] never does.
 ///
 /// A source reports failure with a [`SourceError`], which carries a kind and no message. It must

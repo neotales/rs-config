@@ -213,24 +213,29 @@ The `reload` feature is code only: it adds no dependency and starts no thread by
   time is still detected. Missing, unreadable, and recreated paths are distinct from a present
   file, so deletion and recovery are observed. A change that produces byte-identical contents is
   not a change, because the snapshot would be identical.
-- The observed fingerprint is recorded even when the load fails, so identical failed bytes are not
-  retried on every poll. A later content change retries, and a successful load clears the stored
-  error even when the merged tree equals the still-published snapshot.
+- The observed fingerprint advances only when a load succeeds. A failed load leaves it unchanged and
+  marks the reload pending, so the next poll retries even when the watched bytes and metadata did
+  not change. That covers a torn read and another source that was transiently unavailable. Retry is
+  bounded by the polling interval, not a spin loop, and the last good snapshot stays published. A
+  successful load clears the stored error even when the merged tree equals the still-published
+  snapshot.
 - Refreshes are serialized by one lock. Concurrent manual refreshes, a manual refresh racing a
   poll, and overlapping polls run one at a time. A successful refresh that produces the same value
   tree and provenance returns `Unchanged` and publishes and notifies nothing.
 - `Reload::subscribe` returns a `Subscription` with its own generation. Every subscriber observes
   the newest snapshot independently; notifications coalesce, so a lagging subscriber sees the
-  latest change once rather than every intermediate one. Dropping a subscriber unregisters it.
-  When the last holder and watcher are gone, a receiver reports disconnection.
+  latest change once rather than every intermediate one. A subscriber reads its generation and its
+  snapshot as one atomic pair, so a publication that interleaves with the read cannot make one
+  snapshot appear under two generations. Dropping a subscriber unregisters it. When the last holder
+  and watcher are gone, a receiver reports disconnection.
 - `Reload::start_watching` is the only call that creates a thread. It is explicit, takes a
   non-zero interval, and requires at least one source that reports a path. `Watcher::stop` and
   `Watcher::drop` set the stop flag, wake the thread, and join it. A failed poll records its error
-  and keeps polling.
+  and keeps polling; a pending failure is retried on the next tick.
 - Polling is not an OS notification API. Detection latency is up to the interval plus refresh
   time. Every poll reads every watched file in full to fingerprint it, so cost follows total
-  watched size. A partially written file safely fails and is retried after the next content
-  change; an atomic rename is the recommended write pattern.
+  watched size. A partially written file safely fails and is retried on the next poll even without
+  a content change; an atomic rename is still the recommended write pattern.
 - A published snapshot holds merged values in plaintext. Only the newest snapshot is held by the
   holder, but an older snapshot lives while a `Config` clone references it. A failed load's
   temporary tree is dropped before the outcome returns. Fingerprints store a digest, never file
@@ -353,9 +358,11 @@ text. `Error::source()` is always `None`, so no nested error can reintroduce tex
 | Manual refresh, no-change, and old-snapshot independence | `tests/reload.rs` |
 | A provenance-only change still publishes | `tests/reload.rs` |
 | Independent coalesced subscriptions and disconnection | `tests/reload.rs` |
+| Generation and snapshot are read as one pair | `src/reload.rs` |
 | Serialized concurrent refreshes | `tests/reload.rs` |
 | Baseline before the initial load | `tests/reload.rs` |
 | Failed reload keeps value and provenance, then recovers | `tests/reload.rs` |
+| Pending failure retries without a watched-file change | `tests/reload.rs` |
 | Deletion, recreation, and same-size atomic replacement | `tests/reload.rs` |
 | Explicit watcher publication, failure recovery, and shutdown | `tests/reload.rs` |
 | Dotenv path is watchable | `tests/reload.rs` |

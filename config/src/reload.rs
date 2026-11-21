@@ -15,7 +15,9 @@
 //! - [`Reload::subscribe`] returns a [`Subscription`] for change notifications. Every subscriber
 //!   has its own generation, so one slow reader cannot consume or hide another reader's
 //!   notification. Notifications coalesce: a subscriber that falls behind is told about the
-//!   latest snapshot, not every intermediate one.
+//!   latest snapshot, not every intermediate one. A subscriber reads a generation and its
+//!   snapshot as one atomic pair, so a publication that interleaves with the read can never make
+//!   the same snapshot appear under two generations.
 //!
 //! No thread is created by the feature, by [`crate::Builder::build_reloadable`], or by any
 //! refresh call. A thread exists only after an explicit [`Reload::start_watching`], and
@@ -34,10 +36,14 @@
 //!   is expensive.
 //! - A write in progress can be observed as a partial document. The refresh fails safely, the
 //!   previous good snapshot stays published, [`Reload::last_error`] reports the failure, and the
-//!   next poll retries when the bytes change again. Write a temporary file and rename it over the
-//!   target to avoid a torn read.
-//! - A change that produces byte-identical contents is not a change. The snapshot would be
-//!   identical, so no refresh and no notification is produced.
+//!   next poll retries even when the file's bytes did not change. Write a temporary file and
+//!   rename it over the target to avoid a torn read; the retry then starts from the replacement.
+//! - A failed reload is pending until a later refresh succeeds. The poller retries it on the next
+//!   polling tick, whether the failure came from a watched file or from another source that was
+//!   transiently unavailable. Retry is bounded by the polling interval, not a spin loop, and the
+//!   last good snapshot remains published throughout.
+//! - A change that produces byte-identical contents is not itself a change. The snapshot would be
+//!   identical, so no refresh and no notification is produced. A pending failure is still retried.
 //! - A path that is deleted is a change; a path that is recreated with new contents is another.
 //!   Fingerprints use file contents rather than timestamps, so a replacement that preserves the
 //!   size or the modification time is still detected.
@@ -112,7 +118,6 @@ use std::{
     sync::{
         Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
         Weak,
-        atomic::{AtomicU64, Ordering},
         mpsc::{RecvError, RecvTimeoutError, TryRecvError},
     },
     thread::{self, JoinHandle},
@@ -191,7 +196,7 @@ impl fmt::Debug for Reload {
             .debug_struct("Reload")
             .field("sources", &self.inner.sources.len())
             .field("watched_paths", &self.inner.watch_paths.len())
-            .field("generation", &self.inner.generation.load(Ordering::Relaxed))
+            .field("generation", &self.inner.generation())
             .finish()
     }
 }
@@ -221,10 +226,15 @@ impl Reload {
                 sources,
                 delimiter,
                 watch_paths,
-                snapshot: RwLock::new(snapshot),
-                refresh: Mutex::new(RefreshState { observed: baseline }),
+                published: RwLock::new(Published {
+                    generation: 0,
+                    snapshot,
+                }),
+                refresh: Mutex::new(RefreshState {
+                    observed: baseline,
+                    pending: false,
+                }),
                 subscribers: Mutex::new(Vec::new()),
-                generation: AtomicU64::new(0),
                 last_error: Mutex::new(None),
             }),
         }
@@ -254,18 +264,23 @@ impl Reload {
         self.inner.reload(false)
     }
 
-    /// Reloads only when a watched file's contents changed since the last refresh or poll.
+    /// Reloads only when a watched file's contents changed since the last successful refresh or
+    /// poll, or when an earlier reload failed.
     ///
     /// This is the polling primitive: it fingerprints the watched files, compares the result with
-    /// the contents observed by the previous refresh, poll or initial load, and otherwise behaves
-    /// like [`Reload::refresh`]. With no watched files it always returns
+    /// the contents observed by the previous successful refresh, poll or initial load, and
+    /// otherwise behaves like [`Reload::refresh`]. With no watched files it always returns
     /// [`RefreshOutcome::Unchanged`], because nothing observable can change.
+    ///
+    /// A failed reload stays pending until a later refresh succeeds. While it is pending, this
+    /// method retries the load even if no watched file changed, so a transient failure in another
+    /// source recovers without a second file write. The retry is bounded by the caller's polling
+    /// interval, not a spin loop, and the last good snapshot remains published.
     ///
     /// # Errors
     ///
-    /// A changed file that cannot be read or parsed is returned as [`RefreshOutcome::Failed`],
-    /// and the failure is remembered so the same bytes are not retried on every poll. The
-    /// previous snapshot remains published.
+    /// A source failure is returned as [`RefreshOutcome::Failed`], and the previous snapshot
+    /// remains published. The observed fingerprint is not advanced, so the next call retries.
     #[must_use]
     pub fn refresh_if_changed(&self) -> RefreshOutcome {
         if self.inner.watch_paths.is_empty() {
@@ -281,8 +296,11 @@ impl Reload {
     /// subscription. Dropping it unregisters it.
     #[must_use]
     pub fn subscribe(&self) -> Subscription {
+        // Hold the subscriber list while reading the current generation. A publication updates
+        // the published pair before it tries to notify, so either this call sees the new
+        // generation or the notifier waits and updates this subscriber; neither can miss it.
         let mut subscribers = lock(&self.inner.subscribers);
-        let generation = self.inner.generation.load(Ordering::SeqCst);
+        let generation = self.inner.generation();
         let state = Arc::new(SubscriberState {
             signal: Mutex::new(Signal {
                 generation,
@@ -291,18 +309,22 @@ impl Reload {
             ready: Condvar::new(),
         });
         subscribers.push(Arc::clone(&state));
+        drop(subscribers);
         Subscription {
             inner: Arc::downgrade(&self.inner),
             state,
             seen: Cell::new(generation),
+            #[cfg(test)]
+            hook: None,
         }
     }
 
     /// Starts an explicit polling thread over the files the sources report.
     ///
     /// The thread waits `interval` between polls, calls [`Reload::refresh_if_changed`], and keeps
-    /// running after a failed refresh. No thread is created unless this method is called. The
-    /// returned [`Watcher`] stops and joins the thread on [`Watcher::stop`] or on drop.
+    /// running after a failed refresh. A pending failure is retried on the next poll after
+    /// `interval`, even when no watched file changed. No thread is created unless this method is
+    /// called. The returned [`Watcher`] stops and joins the thread on [`Watcher::stop`] or on drop.
     ///
     /// # Errors
     ///
@@ -338,8 +360,9 @@ impl Reload {
                         break;
                     }
                     drop(stopped);
-                    // The failure is stored on the holder; the poller keeps running so a later
-                    // valid document can recover without restarting the watcher.
+                    // A failure stays pending on the holder, so the next tick retries it even if
+                    // no watched byte changed. The poller therefore keeps running across both a
+                    // torn document and a transiently unavailable source.
                     inner.reload(true);
                     stopped = lock(&thread_stop.stopped);
                 }
@@ -356,7 +379,8 @@ impl Reload {
     ///
     /// A later successful refresh clears it. An [`RefreshOutcome::Unchanged`] from
     /// [`Reload::refresh`] also clears it, because the sources loaded successfully; an unchanged
-    /// result from [`Reload::refresh_if_changed`] leaves it in place, because nothing was loaded.
+    /// result from [`Reload::refresh_if_changed`] leaves it in place only when no failure is
+    /// pending, because nothing was loaded.
     #[must_use]
     pub fn last_error(&self) -> Option<Error> {
         lock(&self.inner.last_error).clone()
@@ -368,7 +392,7 @@ impl Reload {
     /// refresh and a failed refresh do not increment it.
     #[must_use]
     pub fn generation(&self) -> u64 {
-        self.inner.generation.load(Ordering::SeqCst)
+        self.inner.generation()
     }
 
     /// The number of distinct files the polling watcher observes.
@@ -392,6 +416,10 @@ pub struct Subscription {
     inner: Weak<Inner>,
     state: Arc<SubscriberState>,
     seen: Cell<u64>,
+    /// A unit-test seam that runs while the published pair is read-locked, so an interleaving
+    /// test can prove a publisher cannot slip between the generation and the snapshot.
+    #[cfg(test)]
+    hook: Option<Box<dyn Fn() + Send>>,
 }
 
 #[allow(
@@ -487,20 +515,25 @@ impl Subscription {
     }
 
     fn try_take(&self) -> Result<Config, TryRecvError> {
-        let signal = lock(&self.state.signal);
-        if signal.closed {
-            return Err(TryRecvError::Disconnected);
-        }
-        if signal.generation <= self.seen.get() {
-            return Err(TryRecvError::Empty);
-        }
-        let generation = signal.generation;
-        drop(signal);
-        self.seen.set(generation);
         let Some(inner) = self.inner.upgrade() else {
             return Err(TryRecvError::Disconnected);
         };
-        Ok(inner.config())
+        // One lock covers both the generation and the snapshot. A publication is a single write
+        // of the pair, so a reader can never set `seen` from one publication and return a
+        // snapshot from another, which would deliver the same snapshot twice.
+        let published = read(&inner.published);
+        #[cfg(test)]
+        if let Some(hook) = &self.hook {
+            hook();
+        }
+        if published.generation <= self.seen.get() {
+            return Err(TryRecvError::Empty);
+        }
+        let generation = published.generation;
+        let snapshot = Arc::clone(&published.snapshot);
+        drop(published);
+        self.seen.set(generation);
+        Ok(Config::root(snapshot, inner.delimiter))
     }
 }
 
@@ -588,17 +621,27 @@ struct Inner {
     sources: Vec<ResolvedSource>,
     delimiter: char,
     watch_paths: Vec<PathBuf>,
-    snapshot: RwLock<Arc<Snapshot>>,
+    /// The published generation and its snapshot, replaced together under one write lock.
+    published: RwLock<Published>,
     refresh: Mutex<RefreshState>,
     subscribers: Mutex<Vec<Arc<SubscriberState>>>,
-    generation: AtomicU64,
     last_error: Mutex<Option<Error>>,
+}
+
+/// One immutable snapshot together with the generation that published it.
+struct Published {
+    generation: u64,
+    snapshot: Arc<Snapshot>,
 }
 
 impl Inner {
     fn config(&self) -> Config {
-        let snapshot = read(&self.snapshot);
-        Config::root(Arc::clone(&*snapshot), self.delimiter)
+        let published = read(&self.published);
+        Config::root(Arc::clone(&published.snapshot), self.delimiter)
+    }
+
+    fn generation(&self) -> u64 {
+        read(&self.published).generation
     }
 
     /// Serialized reload of every source.
@@ -609,36 +652,51 @@ impl Inner {
         // this fingerprint and the load is loaded now and seen as a difference on the next poll,
         // which is safe: it can only cause a redundant reload, never a missed one.
         let observed = Fingerprints::capture(&self.watch_paths);
-        if only_if_changed && state.observed == observed {
+
+        // A failed reload leaves `pending` set. Retry it even when no watched byte changed: the
+        // failure may belong to another source, or to a torn read that does not alter the
+        // fingerprint. The caller's polling interval bounds the retry rate.
+        if only_if_changed && !state.pending && state.observed == observed {
             return RefreshOutcome::Unchanged;
         }
-        state.observed = observed;
 
         let roots = match load_roots(&self.sources) {
             Ok(roots) => roots,
             Err(error) => {
+                // Do not advance the observed fingerprint. A later poll must load again, and the
+                // published pair stays untouched.
+                state.pending = true;
                 *lock(&self.last_error) = Some(error.clone());
                 return RefreshOutcome::Failed(error);
             }
         };
         let candidate = merge_roots(&self.sources, roots);
 
+        // The load succeeded, so this fingerprint is now the baseline. Advancing it only here is
+        // what makes a failed reload retryable; it also keeps the initial-load ordering contract.
+        state.observed = observed;
+        state.pending = false;
+
         {
-            let current = read(&self.snapshot);
-            if current.as_ref() == &candidate {
+            let current = read(&self.published);
+            if current.snapshot.as_ref() == &candidate {
                 drop(current);
                 *lock(&self.last_error) = None;
                 return RefreshOutcome::Unchanged;
             }
         }
 
-        {
-            let mut current = write(&self.snapshot);
-            *current = Arc::new(candidate);
-        }
+        let generation = {
+            let mut current = write(&self.published);
+            let generation = current.generation + 1;
+            *current = Published {
+                generation,
+                snapshot: Arc::new(candidate),
+            };
+            generation
+        };
         *lock(&self.last_error) = None;
 
-        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.notify(generation);
         RefreshOutcome::Reloaded
     }
@@ -668,9 +726,11 @@ impl Drop for Inner {
     }
 }
 
-/// What the previous refresh observed in the watched files.
+/// What the previous successful refresh observed in the watched files.
 struct RefreshState {
     observed: Fingerprints,
+    /// A prior reload failed and has not yet succeeded.
+    pending: bool,
 }
 
 struct SubscriberState {
@@ -755,4 +815,125 @@ fn read<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
 
 fn write<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
     lock.write().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicI64, Ordering},
+            mpsc::{self, RecvTimeoutError},
+        },
+        thread,
+        time::Duration,
+    };
+
+    use crate::{Builder, SourceError, Value};
+
+    const TIMEOUT: Duration = Duration::from_secs(10);
+
+    fn value(number: i64) -> Value {
+        Value::map([("value", Value::from(number))])
+    }
+
+    /// A publisher must not be able to change the snapshot between the moment a subscriber selects
+    /// its generation and the moment it clones that generation's snapshot. The hook holds the
+    /// pair's read guard open while a publisher tries to publish, so the interleaving that once
+    /// delivered one snapshot under two generations is deterministic.
+    #[test]
+    fn a_publication_cannot_interleave_between_generation_and_snapshot() {
+        let counter = Arc::new(AtomicI64::new(1));
+        let source_counter = Arc::clone(&counter);
+        let reload = Builder::new()
+            .source("counter", move || {
+                Ok::<_, SourceError>(value(source_counter.load(Ordering::SeqCst)))
+            })
+            .build_reloadable()
+            .expect("the fixture builds");
+
+        let mut subscription = reload.subscribe();
+        counter.store(2, Ordering::SeqCst);
+        assert!(reload.refresh().is_reloaded());
+
+        // Pause the reader while it holds the published pair open, once.
+        let (paused_tx, paused_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let resume = Arc::new(Mutex::new(Some(resume_rx)));
+        let hook = move || {
+            let receiver = resume.lock().expect("the hook lock is not poisoned").take();
+            if let Some(receiver) = receiver {
+                paused_tx.send(()).expect("the test listens for the pause");
+                receiver.recv().expect("the test resumes the reader");
+            }
+        };
+        subscription.hook = Some(Box::new(hook));
+
+        let (first_tx, first_rx) = mpsc::channel();
+        let (second_tx, second_rx) = mpsc::channel();
+        let (resume_reader_tx, resume_reader_rx) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            let first = subscription
+                .try_recv()
+                .expect("the first change is pending")
+                .get::<i64>("value")
+                .expect("the fixture value reads");
+            first_tx
+                .send(first)
+                .expect("the test reads the first value");
+            resume_reader_rx
+                .recv()
+                .expect("the test allows the second read");
+            let second = subscription
+                .try_recv()
+                .map(|config| config.get::<i64>("value").expect("the fixture value reads"));
+            second_tx
+                .send(second)
+                .expect("the test reads the second value");
+        });
+
+        paused_rx
+            .recv_timeout(TIMEOUT)
+            .expect("the reader reached its post-generation pause");
+
+        counter.store(3, Ordering::SeqCst);
+        // Keep a strong holder alive while the publisher (which owns the original) finishes, the
+        // way a real process holds its `Reload` across subscriber reads.
+        let _holder = reload.clone();
+        let (published_tx, published_rx) = mpsc::channel();
+        let publisher = thread::spawn(move || {
+            let outcome = reload.refresh();
+            let _ = published_tx.send(());
+            outcome
+        });
+
+        // The reader holds the pair, so the publisher cannot complete until it resumes.
+        assert_eq!(
+            published_rx.recv_timeout(Duration::from_millis(50)),
+            Err(RecvTimeoutError::Timeout),
+            "a publication interleaved between the generation and its snapshot"
+        );
+
+        resume_tx.send(()).expect("the reader is paused");
+        assert_eq!(
+            first_rx.recv_timeout(TIMEOUT).expect("the reader returns"),
+            2,
+            "the first read must return the snapshot for the generation it observed"
+        );
+        assert!(
+            publisher
+                .join()
+                .expect("the publisher does not panic")
+                .is_reloaded(),
+            "the publication succeeds once the reader releases the pair"
+        );
+
+        resume_reader_tx.send(()).expect("the reader is waiting");
+        assert_eq!(
+            second_rx.recv_timeout(TIMEOUT).expect("the reader returns"),
+            Ok(3),
+            "the next read delivers the new snapshot exactly once"
+        );
+        reader.join().expect("the reader does not panic");
+    }
 }

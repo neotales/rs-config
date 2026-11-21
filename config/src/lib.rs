@@ -51,35 +51,24 @@
 //! registration and the delimiter were given in. File formats do not take a separator: their
 //! structure is already expressed by the document, so every key is used literally.
 //!
-//! A file source reads its path again on every load. The `reload` feature adds a [`Reload`] holder
-//! that owns the resolved sources and the current immutable snapshot, so a caller can refresh on
-//! demand or opt into polling. That feature adds no dependency and starts no thread by itself.
-//! [`Reload::start_watching`] is the explicit call that creates a polling thread over the files a
-//! source reports through [`Source::watch_paths`]; [`Watcher`] stops and joins it on drop.
+//! A file source reads its path again on every load.
 //!
-//! # Reload
-//!
-//! [`Builder::build_reloadable`] returns a cloneable [`Reload`] instead of a fixed [`Config`]. It
-//! reloads every source for a new snapshot, publishes the value tree and its provenance together,
-//! and keeps the previous snapshot when a load, parse, or validation fails. [`Reload::refresh`] is
-//! the manual path; [`Reload::subscribe`] delivers coalesced changes to independent subscribers;
-//! [`Reload::start_watching`] is an explicit polling helper with no async runtime. See the
-//! [`reload`](self#reload) module documentation for polling limits, shutdown, errors, and
-//! plaintext lifetime.
-//!
-//! ```
-//! # #[cfg(feature = "reload")]
-//! # fn example() -> Result<(), neotales_config::Error> {
-//! use neotales_config::{Builder, Value};
-//!
-//! let reload = Builder::new()
-//!     .memory("defaults", Value::map([("port", Value::from(8080_i64))]))
-//!     .build_reloadable()?;
-//! assert_eq!(reload.config().get::<u16>("port")?, 8080);
-//! assert!(reload.refresh().is_unchanged());
-//! # Ok(())
-//! # }
-//! ```
+#![cfg_attr(
+    feature = "reload",
+    doc = "
+# Reload
+
+`Builder::build_reloadable` returns a cloneable [`Reload`] instead of a fixed [`Config`]. It
+reloads every source for a new snapshot, publishes the value tree and its provenance together,
+and keeps the previous snapshot when a load, parse, or validation fails. [`Reload::refresh`] is
+the manual path; [`Reload::subscribe`] delivers coalesced changes to independent subscribers;
+[`Reload::start_watching`] is an explicit polling helper, with no async runtime and no thread
+until it is called.
+
+See the [`reload`] module documentation for the full contract: polling limits and
+retry, shutdown, sanitized errors, and the plaintext lifetime of a snapshot.
+"
+)]
 //!
 //! # Example
 //!
@@ -112,7 +101,7 @@ mod config;
 mod de;
 mod error;
 #[cfg(feature = "reload")]
-mod reload;
+pub mod reload;
 mod source;
 mod value;
 
