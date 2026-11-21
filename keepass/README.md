@@ -75,13 +75,15 @@ title, a group name, a file extension, or the process environment.
   Presence comes from that list, not from the codec's entry properties: an absent field rejects the
   source, and a present but empty field reads as `""`. The provider never substitutes a codec
   default.
-- `Title` is the one standard field the published codec does not keep presence for. In KDBX the
-  title is the `<Name>` element, and `neotales-keepass` 0.0.0-alpha.1 replaces a missing `<Name>`
-  with the literal `"Entry"`, so an absent title cannot be distinguished from an explicit `"Entry"`
-  title. The provider therefore does not read `Entry::title`. A `Title` mapping succeeds only when
-  the vault carries a literal `Title` field (some writers, including keepass-rs, store one) and
-  otherwise fails closed. Reading the standard `<Name>` title needs an upstream codec change that
-  preserves its presence.
+- `Title` is a conventional entry `<String>` key, not a special element: KeePassXC's KDBX XML
+  stores the title as `<String><Key>Title</Key><Value>…</Value></String>`, like `UserName` and
+  `Password`. The provider reads it from the entry's field list, so a `Title` mapping succeeds only
+  when the vault carries that literal field and otherwise fails closed. The published codec also
+  exposes a separate `Entry::title`, read from an `<Name>` element; `neotales-keepass`
+  0.0.0-alpha.1 replaces a missing `<Name>` with the literal `"Entry"`, so that property cannot
+  distinguish an absent `<Name>` from an explicit `"Entry"`. The provider never reads
+  `Entry::title`. Preserving `<Name>` presence would need an upstream codec change, but `<Name>` is
+  not the conventional KDBX title field.
 - Every value becomes a `Value::String`. A numeric or boolean spelling is never parsed, and a
   protected value is revealed to UTF-8 text. A value that is not UTF-8 rejects the source.
 - A missing entry, a missing field, and a mapped field that cannot be read all reject the whole
@@ -120,10 +122,12 @@ configured delimiter splits.
 ### Credentials
 
 `CredentialFactory` is the only credential path. Implement it, or pass a closure of type
-`Fn() -> Result<KdbxCredentials, SourceError> + Send + Sync`. The provider calls it once per
-**load**: the initial build, every `Reload::refresh`, and a watcher pass that actually loads because
-a watched file changed or an earlier load failed. A watcher pass over unchanged files does not load
-and does not call the factory. The returned credentials are dropped after that load.
+`Fn() -> Result<KdbxCredentials, SourceError> + Send + Sync`. The provider calls it **at most once
+per load**, after the mappings validate and the file opens successfully: the initial build, every
+`Reload::refresh`, and a watcher pass that actually loads because a watched file changed or an
+earlier load failed. A watcher pass over unchanged files does not load and does not call the
+factory, and a load that fails validation or cannot open the file calls it zero times. The returned
+credentials are dropped after that load.
 
 The watcher fingerprints only the KDBX path. If only the credential source changes, the file
 fingerprint is unchanged and the watcher does not reload; call `Reload::refresh()` yourself after

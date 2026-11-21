@@ -21,13 +21,14 @@ const SUPPORTED_DELIMITERS: [char; 5] = ['.', ':', '/', ',', '|'];
 
 /// A caller-supplied source of KeePass credentials.
 ///
-/// The provider calls [`CredentialFactory::credentials`] exactly once for every **load**: the
-/// initial build, every manual `neotales_config::Reload::refresh`, and a polling pass that
-/// actually loads because a watched file changed or an earlier load failed. A polling pass over
-/// unchanged files does not load and does not call the factory. The reload watcher fingerprints
-/// only the KDBX path, so a change in the credential source alone is invisible to it; call
-/// `neotales_config::Reload::refresh` after rotating a credential. The returned credentials are
-/// dropped after that one load.
+/// The provider calls [`CredentialFactory::credentials`] at most once for every **load**, after
+/// the mappings validate and the file opens successfully. A load is the initial build, every
+/// manual `neotales_config::Reload::refresh`, and a polling pass that actually loads because a
+/// watched file changed or an earlier load failed. A polling pass over unchanged files does not
+/// load and does not call the factory, and a load that fails validation or cannot open the file
+/// calls it zero times. The reload watcher fingerprints only the KDBX path, so a change in the
+/// credential source alone is invisible to it; call `neotales_config::Reload::refresh` after
+/// rotating a credential. The returned credentials are dropped after that one load.
 ///
 /// The factory is the only credential path. The provider never reads a password itself, never
 /// opens a key file, never discovers a vault, and never prompts. Implement the factory with a value
@@ -83,7 +84,8 @@ where
 ///
 /// - the KDBX path is read once per [`Source::load`], always read-only, and the open file is
 ///   passed to the codec as a stream so the provider never buffers the whole vault;
-/// - the credential factory is called once per load;
+/// - the credential factory is called at most once per load, after validation and a successful
+///   file open;
 /// - the read limits are the ones supplied at construction;
 /// - every mapped field becomes a [`Value::String`] at the configured path.
 ///
@@ -327,7 +329,8 @@ fn map_failure(kind: KdbxFailureKind) -> SourceError {
 /// Returns the exact field value as text.
 ///
 /// Presence is exactly [`Entry::field`]: the codec keeps every KDBX `<String>` element in the
-/// ordered field list, including the standard `UserName`, `Password`, `URL`, and `Notes` elements.
+/// ordered field list, including the conventional `Title`, `UserName`, `Password`, `URL`, and
+/// `Notes` elements.
 /// An absent field is rejected rather than read from an [`Entry`] property, because the published
 /// codec does not preserve presence for a property: a missing `<Name>` becomes `"Entry"`, and the
 /// other properties are mirrored from this same list. An explicitly empty field is present and
@@ -395,9 +398,9 @@ mod tests {
         entry.url = "fixture url".into();
         entry.notes = "fixture notes".into();
 
-        // The codec properties are populated, but presence is not known for Title and is only
-        // mirrored from the field list for the rest. A fallback would return `"fixture title"`
-        // for an absent Title, which is exactly what this provider must not do.
+        // The codec properties are populated, but a property is not field presence: `Entry::title`
+        // is a separate `<Name>` value. A fallback would return `"fixture title"` for an absent
+        // Title, which is exactly what this provider must not do.
         for name in ["Title", "UserName", "Password", "URL", "Notes"] {
             assert!(
                 field_text(&entry, name).is_err(),

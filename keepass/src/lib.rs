@@ -19,11 +19,13 @@
 //!
 //! - The KDBX path is explicit. The provider never searches a directory, reads a key file, or
 //!   prompts. The file is opened read-only, passed to the codec as a stream, and never written.
-//! - [`CredentialFactory`] is called exactly once for every load. A load is the initial build, a
-//!   manual `neotales_config::Reload::refresh`, or a polling pass that actually reloads because
-//!   a watched file changed or an earlier load failed. A polling pass over unchanged files does
-//!   not load and does not call the factory. A credential-only change is invisible to the file
-//!   watcher, so call `Reload::refresh` after rotating a credential. The returned
+//! - [`CredentialFactory`] is called at most once for every load, after the mappings validate and
+//!   the file opens successfully. A load is the initial build, a manual
+//!   `neotales_config::Reload::refresh`, or a polling pass that actually reloads because a watched
+//!   file changed or an earlier load failed. A polling pass over unchanged files does not load and
+//!   does not call the factory, and a load that fails validation or cannot open the file calls it
+//!   zero times. A credential-only change is invisible to the file watcher, so call
+//!   `Reload::refresh` after rotating a credential. The returned
 //!   [`neotales_keepass::KdbxCredentials`] is dropped after that load.
 //! - [`KeePassFile::new`] requires [`neotales_keepass::KdbxReadLimits`]. There is no hidden default:
 //!   the caller selects the budget for the trust boundary of the vault.
@@ -46,19 +48,20 @@
 //! # Field presence
 //!
 //! The published `neotales-keepass` codec keeps every KDBX `<String>` element in
-//! [`neotales_keepass::Entry::field`]. That includes the standard `UserName`, `Password`, `URL`,
-//! and `Notes` elements, so those four distinguish an absent field from an explicitly empty one:
-//! absent is `None` and rejects the source, while present-but-empty is `Some` with an empty value
-//! and reads as `""`.
+//! [`neotales_keepass::Entry::field`]. That includes the conventional `Title`, `UserName`,
+//! `Password`, `URL`, and `Notes` elements, so they distinguish an absent field from an explicitly
+//! empty one: absent is `None` and rejects the source, while present-but-empty is `Some` with an
+//! empty value and reads as `""`.
 //!
-//! `Title` is different. In KDBX the title is the `<Name>` element, not a `<String>`, and
-//! `neotales-keepass` 0.0.0-alpha.1 replaces a missing `<Name>` with the literal `"Entry"` while
-//! [`neotales_keepass::Entry::title`] is a plain `String`, never an `Option`. The codec therefore
-//! exposes no way to tell an absent title from an explicit `"Entry"` title, and this provider does
-//! not guess: it never reads `Entry::title`. A `Title` mapping succeeds only when the vault
-//! carries a literal `Title` field (some writers, including keepass-rs, store one) and otherwise
-//! fails closed. Reading the standard `<Name>` title needs an upstream change that preserves its
-//! presence, or a vault that stores a `Title` field.
+//! KeePassXC's KDBX XML writes the entry title as a normal
+//! `<String><Key>Title</Key><Value>…</Value></String>` element, so `Title` is not special: this
+//! provider reads it from the field list like any other key. The codec also exposes a separate
+//! [`neotales_keepass::Entry::title`], read from an `<Name>` element. That property is a plain
+//! `String`, never an `Option`, and `neotales-keepass` 0.0.0-alpha.1 replaces a missing `<Name>`
+//! with the literal `"Entry"`, so it cannot distinguish an absent `<Name>` from an explicit
+//! `"Entry"`. This provider never reads `Entry::title`, and a vault without a literal `Title`
+//! field fails closed. Preserving `<Name>` presence would need an upstream codec change, but
+//! `<Name>` is not the conventional KDBX title field.
 //!
 //! # Secrets
 //!
@@ -88,8 +91,9 @@
 //! let vault = KeePassFile::new(
 //!     "secrets/application.kdbx",
 //!     KdbxReadLimits::default(),
-//!     // Called once per load. Never prompt from here; return the value the
-//!     // process already holds, or an unavailable error.
+//!     // Called at most once per load, after validation and a successful file
+//!     // open. Never prompt from here; return the value the process already
+//!     // holds, or an unavailable error.
 //!     || {
 //!         KdbxCredentials::password(b"from-the-caller")
 //!             .map_err(|_| SourceError::unavailable())
