@@ -21,9 +21,13 @@ const SUPPORTED_DELIMITERS: [char; 5] = ['.', ':', '/', ',', '|'];
 
 /// A caller-supplied source of KeePass credentials.
 ///
-/// The provider calls [`CredentialFactory::credentials`] exactly once for every load: the initial
-/// build, every manual `neotales_config::Reload::refresh`, and every poll the reload watcher
-/// performs. The returned credentials are dropped after that one load.
+/// The provider calls [`CredentialFactory::credentials`] exactly once for every **load**: the
+/// initial build, every manual `neotales_config::Reload::refresh`, and a polling pass that
+/// actually loads because a watched file changed or an earlier load failed. A polling pass over
+/// unchanged files does not load and does not call the factory. The reload watcher fingerprints
+/// only the KDBX path, so a change in the credential source alone is invisible to it; call
+/// `neotales_config::Reload::refresh` after rotating a credential. The returned credentials are
+/// dropped after that one load.
 ///
 /// The factory is the only credential path. The provider never reads a password itself, never
 /// opens a key file, never discovers a vault, and never prompts. Implement the factory with a value
@@ -77,7 +81,8 @@ where
 /// Construct one with [`KeePassFile::new`], add the explicit [`Mapping`]s, and register it with
 /// [`neotales_config::Builder::source`]. The structure is:
 ///
-/// - the KDBX path is read once per [`Source::load`], always read-only;
+/// - the KDBX path is read once per [`Source::load`], always read-only, and the open file is
+///   passed to the codec as a stream so the provider never buffers the whole vault;
 /// - the credential factory is called once per load;
 /// - the read limits are the ones supplied at construction;
 /// - every mapped field becomes a [`Value::String`] at the configured path.
@@ -92,6 +97,8 @@ where
 ///
 /// A mapping that names an absent entry, an absent field, or a field whose bytes are not UTF-8 also
 /// rejects the source. A missing mapping is never skipped, so a partial tree is never published.
+/// Presence is taken from the entry's ordered field list only: the provider does not populate a
+/// missing field from a codec property. See the crate documentation for the `Title` limitation.
 ///
 /// # Errors
 ///
@@ -164,6 +171,8 @@ impl KeePassFile {
     ///
     /// Use [`KdbxReadLimits`] to set the input, header, KDF, block, decompression, XML, and binary
     /// budgets. The value is used unchanged for every load; the provider adds no bound of its own.
+    /// At load the file is opened and handed to the codec as a stream, so the provider never holds
+    /// a whole-vault buffer.
     #[must_use]
     pub fn new(
         path: impl Into<PathBuf>,
@@ -300,7 +309,8 @@ impl Source for KeePassFile {
 
     fn watch_paths(&self) -> Vec<PathBuf> {
         // The path is reported even when the file is absent: creation, replacement, and deletion
-        // are all changes the reload watcher should poll for.
+        // are all changes the reload watcher should poll for. The credential source is not a path
+        // and is not reported; a credential-only change needs a manual refresh.
         vec![self.path.clone()]
     }
 }
@@ -314,19 +324,17 @@ fn map_failure(kind: KdbxFailureKind) -> SourceError {
     }
 }
 
-/// Returns the exact field value as text, with the standard-property fallback.
+/// Returns the exact field value as text.
+///
+/// Presence is exactly [`Entry::field`]: the codec keeps every KDBX `<String>` element in the
+/// ordered field list, including the standard `UserName`, `Password`, `URL`, and `Notes` elements.
+/// An absent field is rejected rather than read from an [`Entry`] property, because the published
+/// codec does not preserve presence for a property: a missing `<Name>` becomes `"Entry"`, and the
+/// other properties are mirrored from this same list. An explicitly empty field is present and
+/// therefore yields an empty string.
 fn field_text(entry: &Entry, name: &str) -> Result<String, SourceError> {
-    if let Some(field) = entry.field(name) {
-        return reveal(&field.value);
-    }
-    match name {
-        "Title" => Ok(entry.title.clone()),
-        "UserName" => Ok(entry.username.clone()),
-        "Password" => reveal(&entry.password),
-        "URL" => Ok(entry.url.clone()),
-        "Notes" => Ok(entry.notes.clone()),
-        _ => Err(SourceError::invalid()),
-    }
+    let field = entry.field(name).ok_or_else(SourceError::invalid)?;
+    reveal(&field.value)
 }
 
 /// Copies a protected value out as plaintext, rejecting non-UTF-8 bytes.
@@ -366,28 +374,52 @@ fn insert(
 
 #[cfg(test)]
 mod tests {
-    use neotales_keepass::{Entry, ProtectedValue};
+    use neotales_keepass::{Entry, Field, ProtectedValue};
 
     use super::field_text;
 
+    fn field(key: &str, value: &str, protected: bool) -> Field {
+        Field {
+            key: key.into(),
+            value: ProtectedValue::from_text(value),
+            protected,
+            protect_in_memory: protected,
+        }
+    }
+
     #[test]
-    fn standard_properties_answer_when_no_ordered_field_exists() {
+    fn a_codec_property_does_not_answer_for_an_absent_field() {
         let mut entry = Entry::new("fixture title");
         entry.username = "fixture user".into();
         entry.password = ProtectedValue::from_text("fixture password");
         entry.url = "fixture url".into();
         entry.notes = "fixture notes".into();
 
-        for (name, expected) in [
-            ("Title", "fixture title"),
-            ("UserName", "fixture user"),
-            ("Password", "fixture password"),
-            ("URL", "fixture url"),
-            ("Notes", "fixture notes"),
+        // The codec properties are populated, but presence is not known for Title and is only
+        // mirrored from the field list for the rest. A fallback would return `"fixture title"`
+        // for an absent Title, which is exactly what this provider must not do.
+        for name in ["Title", "UserName", "Password", "URL", "Notes"] {
+            assert!(
+                field_text(&entry, name).is_err(),
+                "an absent field must not be filled from a property: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_field_answers_including_an_empty_value() {
+        let mut entry = Entry::new("fixture title");
+        for (name, value, protected) in [
+            ("Title", "fixture title field", false),
+            ("UserName", "fixture user field", false),
+            ("Password", "fixture password field", true),
+            ("URL", "fixture url field", false),
+            ("Notes", "", false),
         ] {
+            entry.set_field(field(name, value, protected));
             assert_eq!(
-                field_text(&entry, name).expect("the property answers"),
-                expected
+                field_text(&entry, name).expect("the explicit field answers"),
+                value
             );
         }
     }

@@ -334,17 +334,20 @@ watcher.stop();
 ```
 
 Every file provider, including `DotenvFile`, reports its path through `Source::watch_paths`; a
-custom source can report its own stable files or return an empty list. Polling reads each watched
-file in full to fingerprint its bytes, so a short interval over a large file costs real I/O, and
-detection latency is the interval plus the refresh time. A partially written file fails safely and
-is retried on the next poll even without a content change; write a temporary file and rename it to
-avoid a torn read. A pending failure, including one from another source, is retried at the polling
-interval and the last good snapshot stays published. The baseline is captured before the initial
-load, so a change during startup is not lost. Refreshes are serialized, and subscribers coalesce
-independently to the newest snapshot. There is no async runtime, and no thread exists until
-`start_watching()` is called. A published snapshot holds plaintext, so do not log a `Config` that
-contains a secret. See the crate documentation for the full lifecycle, shutdown, error, and
-lifetime contract.
+custom source can report its own stable files or return an empty list. Polling fingerprints each
+watched file by streaming it in fixed-size chunks, so its memory use is bounded by a chunk rather
+than the file size. It still reads every byte, so a short interval over a large file costs real
+I/O; the fingerprint does not impose a parser's read limit. Detection latency is the interval plus
+the refresh time. A partially written file fails safely and is retried on the next poll even
+without a content change; write a temporary file and rename it to avoid a torn read. A pending
+failure, including one from another source, is retried at the polling interval and the last good
+snapshot stays published. The baseline is captured before the initial load, so a change during
+startup is not lost. Refreshes are serialized, and subscribers coalesce independently to the newest
+snapshot. Only the reported paths are observed: a source whose input also includes something else,
+such as a credential store, is invisible to polling, so call `refresh()` after that input changes.
+There is no async runtime, and no thread exists until `start_watching()` is called. A published
+snapshot holds plaintext, so do not log a `Config` that contains a secret. See the crate
+documentation for the full lifecycle, shutdown, error, and lifetime contract.
 
 **Implement a source.** A source returns a map root or a `SourceError` that carries a kind and no
 message. A closure implements `Source`, so a provider in another crate cannot leak a value through

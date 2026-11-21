@@ -233,9 +233,15 @@ The `reload` feature is code only: it adds no dependency and starts no thread by
   `Watcher::drop` set the stop flag, wake the thread, and join it. A failed poll records its error
   and keeps polling; a pending failure is retried on the next tick.
 - Polling is not an OS notification API. Detection latency is up to the interval plus refresh
-  time. Every poll reads every watched file in full to fingerprint it, so cost follows total
-  watched size. A partially written file safely fails and is retried on the next poll even without
-  a content change; an atomic rename is still the recommended write pattern.
+  time. Every poll streams every watched file in fixed-size chunks to fingerprint it: memory is
+  bounded by a single chunk, not the file size, but the whole file is still read, so disk I/O and
+  cost follow total watched size. The fingerprint is independent of any provider's read limit;
+  that limit applies when the source loads.
+- Change detection covers only the paths a source reports through `Source::watch_paths`. An input
+  that is not one of those files (for example a credential store) is invisible to polling; call
+  `Reload::refresh` after it changes.
+- A partially written file safely fails and is retried on the next poll even without a content
+  change; an atomic rename is still the recommended write pattern.
 - A published snapshot holds merged values in plaintext. Only the newest snapshot is held by the
   holder, but an older snapshot lives while a `Config` clone references it. A failed load's
   temporary tree is dropped before the outcome returns. Fingerprints store a digest, never file

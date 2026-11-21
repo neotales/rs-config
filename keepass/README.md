@@ -9,7 +9,12 @@ By [x0craft](https://github.com/x0craft).
 
 ## Install
 
+The examples below import three crates: the provider, the core builder, and the KDBX codec whose
+types appear in the provider's API. Add all three directly; neither dependency is re-exported.
+
 ```sh
+cargo add neotales-config@0.0.0-alpha.0
+cargo add neotales-keepass@0.0.0-alpha.1
 cargo add neotales-config-keepass@0.0.0-alpha.0
 ```
 
@@ -23,6 +28,9 @@ holder and the explicit polling watcher for the whole path:
 ```sh
 cargo add neotales-config-keepass@0.0.0-alpha.0 --features reload
 ```
+
+Cargo unifies features, so this also enables `neotales-config/reload` through the provider's
+dependency; the direct `neotales-config` line above does not need the feature repeated.
 
 The first version is not on crates.io yet. It depends on `neotales-config` at the same group
 version, so it can be uploaded only after that core version is on crates.io. See the repository
@@ -64,8 +72,16 @@ title, a group name, a file extension, or the process environment.
 ### Mapping rules
 
 - A field key is matched exactly and case-sensitively against the entry's ordered field list.
-- `Title`, `UserName`, `Password`, `URL`, and `Notes` fall back to the entry's standard property
-  when the codec kept it outside the ordered field list. A field present in the list wins.
+  Presence comes from that list, not from the codec's entry properties: an absent field rejects the
+  source, and a present but empty field reads as `""`. The provider never substitutes a codec
+  default.
+- `Title` is the one standard field the published codec does not keep presence for. In KDBX the
+  title is the `<Name>` element, and `neotales-keepass` 0.0.0-alpha.1 replaces a missing `<Name>`
+  with the literal `"Entry"`, so an absent title cannot be distinguished from an explicit `"Entry"`
+  title. The provider therefore does not read `Entry::title`. A `Title` mapping succeeds only when
+  the vault carries a literal `Title` field (some writers, including keepass-rs, store one) and
+  otherwise fails closed. Reading the standard `<Name>` title needs an upstream codec change that
+  preserves its presence.
 - Every value becomes a `Value::String`. A numeric or boolean spelling is never parsed, and a
   protected value is revealed to UTF-8 text. A value that is not UTF-8 rejects the source.
 - A missing entry, a missing field, and a mapped field that cannot be read all reject the whole
@@ -104,9 +120,14 @@ configured delimiter splits.
 ### Credentials
 
 `CredentialFactory` is the only credential path. Implement it, or pass a closure of type
-`Fn() -> Result<KdbxCredentials, SourceError> + Send + Sync`. The provider calls it once per load:
-the initial build, every `Reload::refresh`, and every watcher poll. The returned credentials are
-dropped after that load.
+`Fn() -> Result<KdbxCredentials, SourceError> + Send + Sync`. The provider calls it once per
+**load**: the initial build, every `Reload::refresh`, and a watcher pass that actually loads because
+a watched file changed or an earlier load failed. A watcher pass over unchanged files does not load
+and does not call the factory. The returned credentials are dropped after that load.
+
+The watcher fingerprints only the KDBX path. If only the credential source changes, the file
+fingerprint is unchanged and the watcher does not reload; call `Reload::refresh()` yourself after
+rotating a credential.
 
 The factory runs on whichever thread performs the load, including the watcher thread. It must not
 prompt, and it must be safe to call from more than one thread. The error type is `SourceError`,
@@ -121,7 +142,8 @@ never asks a terminal or a desktop for input.
 `KeePassFile::new` requires `KdbxReadLimits`. The provider passes the value unchanged to every
 load and adds no hidden bound. Choose the input, header, KDF, block, decompression, XML, and binary
 budgets for the trust boundary of the vault; `KdbxReadLimits::default()` is the codec's
-conservative baseline, not a policy for hostile input.
+conservative baseline, not a policy for hostile input. At load the file is handed to the codec as
+an open stream, so the provider itself never holds a whole-vault buffer.
 
 ### Errors
 
@@ -172,12 +194,17 @@ watcher.stop();
 
 A failed reload, from a torn write, a replaced file, wrong credentials, or an exceeded limit, does
 not publish anything: the previous good snapshot stays current, `Reload::last_error` reports the
-sanitized failure, and a pending failure is retried on the next poll. A credential factory is called
-again on that retry, so a transient secret-store failure can recover without touching the file.
+sanitized failure, and a pending failure is retried on the next poll. The credential factory is
+called again on that retry, so a transient secret-store failure can recover without touching the
+file. That pending-failure retry is the only case where a poll over unchanged bytes calls the
+factory; a successful poll does not.
 
-The watcher is a polling watcher, not an OS notification API. Detection latency is up to the polling
-interval plus the load time, and each poll reads the watched file's bytes to fingerprint them. Write
-a temporary file and rename it over the vault to avoid a torn read.
+The watcher is a polling watcher, not an OS notification API. It fingerprints the KDBX path by
+streaming the file in fixed-size chunks, so its memory use is bounded by one chunk rather than the
+file size. It still reads every byte on every poll, so disk I/O is proportional to the vault size
+and the polling interval; it does not impose `KdbxReadLimits` (the load does). Detection latency is
+up to the polling interval plus the load time. Write a temporary file and rename it over the vault
+to avoid a torn read.
 
 ## Secrets and lifetime
 

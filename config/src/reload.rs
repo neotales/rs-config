@@ -31,9 +31,14 @@
 //! everywhere.
 //!
 //! - Detection latency is up to the polling interval, plus the time the refresh itself takes.
-//! - Each poll reads every watched file in full to fingerprint its bytes. Cost is proportional to
-//!   the total watched size, not to the size of a change. A large file watched at a short interval
-//!   is expensive.
+//! - Each poll fingerprints every watched file by streaming it in fixed-size chunks. Memory is
+//!   bounded by a single fixed-size chunk, not by the file size. Disk I/O is **not** bounded: the
+//!   whole file is still read on every poll, so cost follows the total watched size, not the size
+//!   of a change. A large file watched at a short interval is expensive. The fingerprint imposes no
+//!   parser's or provider's read limit; those apply when a source loads.
+//! - Only the paths a source reports are observed. A source whose contents also depend on
+//!   something else, such as a credential store, does not report a change in that input, so a poll
+//!   leaves the published snapshot alone. Call [`Reload::refresh`] after changing it.
 //! - A write in progress can be observed as a partial document. The refresh fails safely, the
 //!   previous good snapshot stays published, [`Reload::last_error`] reports the failure, and the
 //!   next poll retries even when the file's bytes did not change. Write a temporary file and
@@ -114,6 +119,8 @@
 use std::{
     cell::Cell,
     fmt,
+    fs::File,
+    io::{self, Read},
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
@@ -270,7 +277,9 @@ impl Reload {
     /// This is the polling primitive: it fingerprints the watched files, compares the result with
     /// the contents observed by the previous successful refresh, poll or initial load, and
     /// otherwise behaves like [`Reload::refresh`]. With no watched files it always returns
-    /// [`RefreshOutcome::Unchanged`], because nothing observable can change.
+    /// [`RefreshOutcome::Unchanged`], because nothing observable can change. Only the paths a
+    /// source reports are observed; a change in another input, such as a credential store, is
+    /// invisible here and needs [`Reload::refresh`].
     ///
     /// A failed reload stays pending until a later refresh succeeds. While it is pending, this
     /// method retries the load even if no watched file changed, so a transient failure in another
@@ -778,9 +787,36 @@ impl Fingerprints {
 
 impl Fingerprint {
     fn of(path: &Path) -> Self {
-        match std::fs::read(path) {
-            Ok(bytes) => Self::Present(digest(&bytes)),
+        let Ok(file) = File::open(path) else {
+            return Self::Missing;
+        };
+        match fingerprint_reader(file) {
+            Ok(value) => Self::Present(value),
             Err(_) => Self::Missing,
+        }
+    }
+}
+
+/// The size of one fingerprint read. Memory is bounded by this, not by the file size; the whole
+/// file is still read.
+const CHUNK_BYTES: usize = 16 * 1024;
+
+/// Hashes a reader in fixed-size chunks.
+///
+/// The buffer is allocated once per call and never grows. This bounds memory for the fingerprint
+/// of any file size; it does not bound the disk I/O, which still reads the whole file.
+fn fingerprint_reader(mut reader: impl Read) -> io::Result<u64> {
+    let mut buffer = vec![0_u8; CHUNK_BYTES];
+    let mut digest = Digest::new();
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => return Ok(digest.finish()),
+            Ok(read) => {
+                digest.update(&buffer[..read]);
+                digest.add_length(read);
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
         }
     }
 }
@@ -791,18 +827,37 @@ impl Fingerprint {
 /// is never printed by a public type, and is only compared with the previous poll. A collision
 /// would mean one missed automatic poll, which is why the contents are read rather than trusting a
 /// timestamp; a manual [`Reload::refresh`] does not depend on it at all.
-fn digest(bytes: &[u8]) -> u64 {
+struct Digest {
+    hash: u64,
+    length: u64,
+}
+
+impl Digest {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
 
-    let mut hash = OFFSET;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(PRIME);
+    const fn new() -> Self {
+        Self {
+            hash: Self::OFFSET,
+            length: 0,
+        }
     }
-    let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    hash ^= length;
-    hash.wrapping_mul(PRIME)
+
+    fn update(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.hash ^= u64::from(*byte);
+            self.hash = self.hash.wrapping_mul(Self::PRIME);
+        }
+    }
+
+    fn add_length(&mut self, read: usize) {
+        let read = u64::try_from(read).unwrap_or(u64::MAX);
+        self.length = self.length.saturating_add(read);
+    }
+
+    const fn finish(&self) -> u64 {
+        (self.hash ^ self.length).wrapping_mul(Self::PRIME)
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -820,9 +875,10 @@ fn write<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use std::{
+        io::{self, Read},
         sync::{
             Arc, Mutex,
-            atomic::{AtomicI64, Ordering},
+            atomic::{AtomicI64, AtomicUsize, Ordering},
             mpsc::{self, RecvTimeoutError},
         },
         thread,
@@ -935,5 +991,70 @@ mod tests {
             "the next read delivers the new snapshot exactly once"
         );
         reader.join().expect("the reader does not panic");
+    }
+
+    #[test]
+    fn fingerprinting_streams_in_bounded_chunks_and_covers_every_byte() {
+        struct RecordingReader {
+            data: Vec<u8>,
+            position: usize,
+            largest_request: Arc<AtomicUsize>,
+        }
+
+        impl Read for RecordingReader {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                self.largest_request
+                    .fetch_max(buffer.len(), Ordering::SeqCst);
+                let remaining = &self.data[self.position..];
+                // A reader may return less than the buffer holds; the hasher must keep going
+                // without losing or duplicating a byte.
+                let size = remaining.len().min(buffer.len()).min(7);
+                buffer[..size].copy_from_slice(&remaining[..size]);
+                self.position += size;
+                Ok(size)
+            }
+        }
+
+        let data: Vec<u8> = (0..super::CHUNK_BYTES * 3 + 7)
+            .map(|index| u8::try_from(index % 251).expect("the remainder fits in u8"))
+            .collect();
+        let largest = Arc::new(AtomicUsize::new(0));
+        let observed = super::fingerprint_reader(RecordingReader {
+            data: data.clone(),
+            position: 0,
+            largest_request: Arc::clone(&largest),
+        })
+        .expect("an in-memory reader never fails");
+
+        let mut expected = super::Digest::new();
+        expected.update(&data);
+        expected.add_length(data.len());
+        assert_eq!(observed, expected.finish());
+        assert_eq!(
+            largest.load(Ordering::SeqCst),
+            super::CHUNK_BYTES,
+            "the fingerprint must use one fixed-size buffer"
+        );
+    }
+
+    #[test]
+    fn a_missing_path_a_directory_and_a_present_empty_file_are_distinct() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let missing = directory.path().join("absent");
+        let empty = directory.path().join("empty");
+        std::fs::write(&empty, b"").expect("the empty fixture is writable");
+
+        assert_eq!(
+            super::Fingerprint::of(&missing),
+            super::Fingerprint::Missing
+        );
+        assert_eq!(
+            super::Fingerprint::of(directory.path()),
+            super::Fingerprint::Missing,
+            "a directory is not a readable watched file"
+        );
+        let present = super::Fingerprint::of(&empty);
+        assert_ne!(present, super::Fingerprint::Missing);
+        assert_eq!(present, super::Fingerprint::of(&empty));
     }
 }

@@ -222,6 +222,104 @@ fn refresh_if_changed_has_nothing_to_observe_without_watched_files() {
 }
 
 #[test]
+fn a_large_watched_file_is_fingerprinted_to_its_last_byte() {
+    const SIZE: usize = 2 * 1024 * 1024;
+
+    struct TailSource {
+        path: PathBuf,
+    }
+
+    impl Source for TailSource {
+        fn load(&self) -> Result<Value, SourceError> {
+            let bytes = fs::read(&self.path).map_err(|_| SourceError::unavailable())?;
+            let tail = bytes.last().copied().ok_or_else(SourceError::invalid)?;
+            Ok(Value::map([("tail", Value::from(i64::from(tail)))]))
+        }
+
+        fn watch_paths(&self) -> Vec<PathBuf> {
+            vec![self.path.clone()]
+        }
+    }
+
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let path = directory.path().join("large.bin");
+    let mut first = vec![b'a'; SIZE];
+    first[SIZE - 1] = b'A';
+    fs::write(&path, &first).expect("the fixture is writable");
+
+    let reload = Builder::new()
+        .source("tail", TailSource { path: path.clone() })
+        .build_reloadable()
+        .expect("the fixture builds");
+    assert_eq!(reload.config().get::<i64>("tail").unwrap(), i64::from(b'A'));
+    assert_eq!(reload.refresh_if_changed(), RefreshOutcome::Unchanged);
+
+    // Same size, different final byte: detection proves the fingerprint read past its first
+    // chunk rather than only a prefix of the file.
+    let mut second = first.clone();
+    second[SIZE - 1] = b'B';
+    fs::write(&path, &second).expect("the replacement is writable");
+    assert_eq!(reload.refresh_if_changed(), RefreshOutcome::Reloaded);
+    assert_eq!(reload.config().get::<i64>("tail").unwrap(), i64::from(b'B'));
+
+    // Truncation and growth are changes too.
+    fs::write(&path, &second[..SIZE / 2]).expect("the truncation is writable");
+    assert_eq!(reload.refresh_if_changed(), RefreshOutcome::Reloaded);
+    assert_eq!(reload.config().get::<i64>("tail").unwrap(), i64::from(b'a'));
+
+    let mut third = second;
+    third.push(b'C');
+    fs::write(&path, &third).expect("the growth is writable");
+    assert_eq!(reload.refresh_if_changed(), RefreshOutcome::Reloaded);
+    assert_eq!(reload.config().get::<i64>("tail").unwrap(), i64::from(b'C'));
+}
+
+#[test]
+fn the_watcher_detects_a_tail_change_in_a_large_file() {
+    const SIZE: usize = 1024 * 1024;
+
+    struct TailSource {
+        path: PathBuf,
+    }
+
+    impl Source for TailSource {
+        fn load(&self) -> Result<Value, SourceError> {
+            let bytes = fs::read(&self.path).map_err(|_| SourceError::unavailable())?;
+            let tail = bytes.last().copied().ok_or_else(SourceError::invalid)?;
+            Ok(Value::map([("tail", Value::from(i64::from(tail)))]))
+        }
+
+        fn watch_paths(&self) -> Vec<PathBuf> {
+            vec![self.path.clone()]
+        }
+    }
+
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let path = directory.path().join("large.bin");
+    let mut first = vec![b'a'; SIZE];
+    first[SIZE - 1] = b'A';
+    fs::write(&path, &first).expect("the fixture is writable");
+
+    let reload = Builder::new()
+        .source("tail", TailSource { path: path.clone() })
+        .build_reloadable()
+        .expect("the fixture builds");
+    let subscription = reload.subscribe();
+    let watcher = reload
+        .start_watching(Duration::from_millis(10))
+        .expect("a file source is watchable");
+
+    let mut second = first;
+    second[SIZE - 1] = b'Z';
+    fs::write(&path, &second).expect("the replacement is writable");
+    let config = subscription
+        .recv_timeout(TIMEOUT)
+        .expect("the watcher publishes the large replacement");
+    assert_eq!(config.get::<i64>("tail").unwrap(), i64::from(b'Z'));
+    watcher.stop();
+}
+
+#[test]
 fn concurrent_refreshes_are_serialized() {
     let in_load = Arc::new(AtomicBool::new(false));
     let loads = Arc::new(AtomicUsize::new(0));

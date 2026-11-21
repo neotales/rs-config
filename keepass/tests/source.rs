@@ -16,8 +16,9 @@ use neotales_config::{Builder, Source, SourceError, SourceErrorKind};
 use neotales_config_keepass::{KeePassFile, Mapping};
 use neotales_keepass::{KdbxCredentials, KdbxReadLimits, KdbxUuid};
 use support::{
-    BLOCK_A, ENTRY_A, ENTRY_PASSWORD_A, Fixture, MASTER_PASSWORD, TITLE_A, TOKEN_A, TOKEN_B,
-    USERNAME_A, WRONG_PASSWORD,
+    BLOCK_A, ENTRY_A, ENTRY_ABSENT, ENTRY_EMPTY, ENTRY_PASSWORD_A, Fixture, MASTER_PASSWORD,
+    NOTES_A, PresenceFixture, STANDARD_FIELDS, TITLE_FIELD_A, TOKEN_A, TOKEN_B, URL_A, USERNAME_A,
+    WRONG_PASSWORD,
 };
 
 fn blank(fixture: &Fixture) -> KeePassFile {
@@ -57,12 +58,29 @@ fn maps_explicit_entries_and_fields_to_nested_paths() {
         config.get::<String>("other.token").expect("mapped"),
         TOKEN_B
     );
+    assert_eq!(
+        config.get::<String>("entry.title").expect("mapped"),
+        TITLE_FIELD_A
+    );
+    assert_eq!(
+        config.get::<String>("entry.user").expect("mapped"),
+        USERNAME_A
+    );
+    assert_eq!(
+        config.get::<String>("entry.password").expect("mapped"),
+        ENTRY_PASSWORD_A
+    );
+    assert_eq!(config.get::<String>("entry.url").expect("mapped"), URL_A);
+    assert_eq!(
+        config.get::<String>("entry.notes").expect("mapped"),
+        NOTES_A
+    );
     assert_eq!(config.origin("app.db.user").expect("mapped"), "vault");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
-fn standard_title_and_username_are_available() {
+fn standard_fields_are_read_from_the_ordered_field_list() {
     let fixture = Fixture::new();
     let config = Builder::new()
         .source(
@@ -72,14 +90,44 @@ fn standard_title_and_username_are_available() {
         .build()
         .expect("the vault loads");
 
+    // The `Title` field differs from the entry's `<Name>` (`TITLE_A`), so this proves the
+    // provider reads the explicit field list rather than the codec's `title` property.
     assert_eq!(
         config.get::<String>("entry.title").expect("mapped"),
-        TITLE_A
+        TITLE_FIELD_A
     );
     assert_eq!(
         config.get::<String>("entry.user").expect("mapped"),
         USERNAME_A
     );
+}
+
+#[test]
+fn an_absent_standard_field_is_rejected_not_filled_from_a_codec_property() {
+    let fixture = PresenceFixture::new();
+
+    // The absent entry has `<Name>standard-absent</Name>` and no standard `<String>` elements.
+    // A fallback would return that name for Title or empty strings for the other four.
+    for field in STANDARD_FIELDS {
+        invalid(&fixture.provider(ENTRY_ABSENT, field));
+    }
+}
+
+#[test]
+fn an_explicitly_empty_standard_field_reads_as_an_empty_string() {
+    let fixture = PresenceFixture::new();
+
+    for field in STANDARD_FIELDS {
+        let config = Builder::new()
+            .source("vault", fixture.provider(ENTRY_EMPTY, field))
+            .build()
+            .expect("the present field loads");
+        assert_eq!(
+            config.get::<String>("probe.value").expect("mapped"),
+            "",
+            "an explicitly empty {field} is present and empty, not absent"
+        );
+    }
 }
 
 #[test]

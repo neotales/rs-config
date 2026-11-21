@@ -9,6 +9,10 @@ use crate::SourceError;
 /// A read failure is [`SourceError::unavailable`]. A file that is not UTF-8 is
 /// [`SourceError::invalid`]: the format sources never transcode, so a document is either valid
 /// UTF-8 or rejected. The failure carries no path, no bytes, and no parser text.
+///
+/// The parser needs the whole document as one `&str`, so this intentionally holds the document
+/// once. It is not used for change detection: the reload fingerprint streams the same path in
+/// fixed chunks and never builds a whole-file buffer.
 pub(crate) fn read_text(path: &Path) -> Result<String, SourceError> {
     let bytes = std::fs::read(path).map_err(|_| SourceError::unavailable())?;
     String::from_utf8(bytes).map_err(|_| SourceError::invalid())

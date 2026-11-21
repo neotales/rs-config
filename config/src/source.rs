@@ -132,7 +132,9 @@ pub trait Source: Send + Sync {
     /// The paths are used for change detection only. They are never stored on an error, printed
     /// by a [`fmt::Debug`] implementation, or published in a snapshot, because a path can name a
     /// host or a user. A source whose content comes from somewhere a local file cannot describe
-    /// returns an empty list rather than a guess.
+    /// returns an empty list rather than a guess. Polling observes only these paths: if the
+    /// content also depends on another input, such as a credential store, a poll cannot see that
+    /// input change and the caller must use `Reload::refresh` instead.
     #[must_use]
     fn watch_paths(&self) -> Vec<PathBuf> {
         Vec::new()
