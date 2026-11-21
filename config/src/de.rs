@@ -129,6 +129,22 @@ fn with_component(mut error: DeError, component: &str) -> DeError {
     error
 }
 
+/// Reads an enum payload with its variant component on the failing path.
+///
+/// An externally tagged payload lives under the variant name, which is a map key in the tree, so
+/// the path to a failure below it starts with that name. Without the component attribution would
+/// stop at the enum node and name the source of the map instead of the source of the leaf.
+fn in_variant<T>(
+    path: &mut Vec<String>,
+    variant: &str,
+    read: impl FnOnce(&mut Vec<String>) -> Result<T, DeError>,
+) -> Result<T, DeError> {
+    path.push(variant.to_owned());
+    let outcome = read(&mut *path);
+    path.pop();
+    outcome.map_err(|error| with_component(error, variant))
+}
+
 /// The node as an exact integer.
 ///
 /// Only [`Value::Integer`] qualifies. A float is never read as an integer, whatever its fraction,
@@ -582,6 +598,7 @@ impl<'de, 'p> de::EnumAccess<'de> for EnumAccessor<'de, 'p> {
         Ok((
             variant,
             VariantAccessor {
+                variant: self.variant,
                 value: self.value,
                 path: self.path,
             },
@@ -590,6 +607,7 @@ impl<'de, 'p> de::EnumAccess<'de> for EnumAccessor<'de, 'p> {
 }
 
 struct VariantAccessor<'de, 'p> {
+    variant: &'de str,
     value: Option<&'de Value>,
     path: &'p mut Vec<String>,
 }
@@ -598,24 +616,41 @@ impl<'de> VariantAccess<'de> for VariantAccessor<'de, '_> {
     type Error = DeError;
 
     fn unit_variant(self) -> Result<(), DeError> {
-        match self.value {
+        let Self { variant, value, .. } = self;
+        match value {
             None => Ok(()),
-            Some(_) => Err(DeError::mismatch("a unit variant")),
+            // The offending node is the value stored under the variant key, so the path names the
+            // variant even though nothing is read.
+            Some(_) => Err(with_component(DeError::mismatch("a unit variant"), variant)),
         }
     }
 
     fn newtype_variant_seed<T: DeserializeSeed<'de>>(self, seed: T) -> Result<T::Value, DeError> {
-        match self.value {
-            Some(value) => seed.deserialize(Cursor::new(Node::Value(value), self.path)),
-            None => Err(DeError::mismatch("a newtype variant")),
-        }
+        let Self {
+            variant,
+            value,
+            path,
+        } = self;
+        let Some(value) = value else {
+            return Err(DeError::mismatch("a newtype variant"));
+        };
+        in_variant(path, variant, |path| {
+            seed.deserialize(Cursor::new(Node::Value(value), path))
+        })
     }
 
     fn tuple_variant<V: Visitor<'de>>(self, len: usize, visitor: V) -> Result<V::Value, DeError> {
-        match self.value {
-            Some(value) => fixed_sequence(Node::Value(value), len, visitor, self.path),
-            None => Err(DeError::mismatch("a tuple variant")),
-        }
+        let Self {
+            variant,
+            value,
+            path,
+        } = self;
+        let Some(value) = value else {
+            return Err(DeError::mismatch("a tuple variant"));
+        };
+        in_variant(path, variant, |path| {
+            fixed_sequence(Node::Value(value), len, visitor, path)
+        })
     }
 
     fn struct_variant<V: Visitor<'de>>(
@@ -623,14 +658,22 @@ impl<'de> VariantAccess<'de> for VariantAccessor<'de, '_> {
         _fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, DeError> {
-        match self.value {
-            Some(Value::Map(map)) => visitor.visit_map(MapAccessor {
+        let Self {
+            variant,
+            value,
+            path,
+        } = self;
+        let Some(value) = value else {
+            return Err(DeError::mismatch("a struct variant"));
+        };
+        in_variant(path, variant, |path| match value {
+            Value::Map(map) => visitor.visit_map(MapAccessor {
                 entries: map.iter(),
                 pending: None,
-                path: self.path,
+                path,
             }),
             _ => Err(DeError::mismatch("a struct variant")),
-        }
+        })
     }
 }
 

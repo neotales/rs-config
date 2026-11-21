@@ -387,7 +387,8 @@ impl Config {
     /// never a caller-supplied serde message or expectation. Its source is the one that wrote the
     /// failing leaf when the snapshot records one, otherwise the nearest recorded ancestor: a
     /// failure below a struct field is attributed to that field's source, not to the map that
-    /// contains it.
+    /// contains it, and a failure inside an externally tagged enum payload is attributed through
+    /// the variant key that holds the payload.
     pub fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, Error> {
         self.validate_path(path)?;
         let Some(value) = self.resolve(path) else {

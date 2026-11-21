@@ -22,6 +22,17 @@ enum Connection {
     Struct(Endpoint),
 }
 
+#[derive(Debug, Deserialize, PartialEq)]
+enum Shape {
+    Unit,
+    New(u16),
+    Tuple(u16, u16),
+    Struct { port: u16 },
+}
+
+/// The value a variant payload is given when it must fail to deserialize.
+const INVALID: &str = "fixture-secret-9f3a2c";
+
 fn fixture() -> Config {
     Builder::new()
         .memory(
@@ -300,6 +311,150 @@ fn a_nested_mismatch_inside_an_array_names_the_array_source() {
         .expect_err("the second element is a string");
     assert!(error.is_type_mismatch(), "{error}");
     assert_eq!(error.source_name(), Some("overlay"), "{error}");
+}
+
+#[test]
+fn an_enum_payload_mismatch_names_the_source_of_the_failing_leaf() {
+    // Every variant shape is introduced by `defaults` and its failing payload node is written by
+    // `overlay`, so attributing the enum node itself reports the wrong source.
+    let config = Builder::new()
+        .memory(
+            "defaults",
+            Value::map([
+                ("new", Value::map([("New", Value::from(1_i64))])),
+                (
+                    "tuple",
+                    Value::map([(
+                        "Tuple",
+                        Value::array([Value::from(1_i64), Value::from(2_i64)]),
+                    )]),
+                ),
+                (
+                    "struct",
+                    Value::map([("Struct", Value::map([("port", Value::from(8080_i64))]))]),
+                ),
+            ]),
+        )
+        .memory(
+            "overlay",
+            Value::map([
+                ("new", Value::map([("New", Value::from(INVALID))])),
+                (
+                    "tuple",
+                    Value::map([(
+                        "Tuple",
+                        Value::array([Value::from(1_i64), Value::from(INVALID)]),
+                    )]),
+                ),
+                (
+                    "struct",
+                    Value::map([("Struct", Value::map([("port", Value::from(INVALID))]))]),
+                ),
+            ]),
+        )
+        .build()
+        .expect("the fixture builds");
+
+    // The fixtures are what make the attribution observable: the enum map and the struct variant
+    // map come from `defaults`, and only the failing payload leaf comes from `overlay`.
+    assert_eq!(config.origin("new").unwrap(), "defaults");
+    assert_eq!(config.origin("new.New").unwrap(), "overlay");
+    assert_eq!(config.origin("tuple").unwrap(), "defaults");
+    assert_eq!(config.origin("tuple.Tuple").unwrap(), "overlay");
+    assert_eq!(config.origin("struct").unwrap(), "defaults");
+    assert_eq!(config.origin("struct.Struct").unwrap(), "defaults");
+    assert_eq!(config.origin("struct.Struct.port").unwrap(), "overlay");
+
+    for (path, expected) in [
+        ("new", "an unsigned 16-bit integer"),
+        ("tuple", "an unsigned 16-bit integer"),
+        ("struct", "an unsigned 16-bit integer"),
+    ] {
+        let error = config
+            .get::<Shape>(path)
+            .expect_err("the payload is a string, not an integer");
+        assert!(error.is_type_mismatch(), "{error}");
+        // The reported path is the path that was read, not the internal leaf.
+        assert_eq!(error.path(), Some(path), "{error}");
+        assert_eq!(error.expected(), Some(expected), "{error}");
+        assert_eq!(
+            error.source_name(),
+            Some("overlay"),
+            "the failing payload leaf from `overlay` must answer for `{path}`: {error}"
+        );
+        for text in [format!("{error}"), format!("{error:?}")] {
+            assert!(
+                !text.contains(INVALID),
+                "the payload reached the error: {text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_enum_payload_of_the_wrong_shape_names_the_payload_source() {
+    // Here the payload node itself is the one that fails, and only `overlay` wrote it. The variant
+    // key must be part of the failing path, or attribution falls back to the enum map from
+    // `defaults`.
+    let config = Builder::new()
+        .memory(
+            "defaults",
+            Value::map([
+                ("unit", Value::map([("Unit", Value::Null)])),
+                (
+                    "tuple",
+                    Value::map([(
+                        "Tuple",
+                        Value::array([Value::from(1_i64), Value::from(2_i64)]),
+                    )]),
+                ),
+                (
+                    "struct",
+                    Value::map([("Struct", Value::map([("port", Value::from(8080_i64))]))]),
+                ),
+            ]),
+        )
+        .memory(
+            "overlay",
+            Value::map([
+                ("unit", Value::map([("Unit", Value::from(1_i64))])),
+                ("tuple", Value::map([("Tuple", Value::from(INVALID))])),
+                ("struct", Value::map([("Struct", Value::from(INVALID))])),
+            ]),
+        )
+        .build()
+        .expect("the fixture builds");
+
+    assert_eq!(config.origin("unit").unwrap(), "defaults");
+    assert_eq!(config.origin("unit.Unit").unwrap(), "overlay");
+    assert_eq!(config.origin("tuple").unwrap(), "defaults");
+    assert_eq!(config.origin("tuple.Tuple").unwrap(), "overlay");
+    assert_eq!(config.origin("struct").unwrap(), "defaults");
+    assert_eq!(config.origin("struct.Struct").unwrap(), "overlay");
+
+    for (path, expected) in [
+        ("unit", "a unit variant"),
+        ("tuple", "a sequence of the expected length"),
+        ("struct", "a struct variant"),
+    ] {
+        let error = config
+            .get::<Shape>(path)
+            .expect_err("the payload has the wrong shape");
+        assert!(error.is_type_mismatch(), "{error}");
+        assert_eq!(error.path(), Some(path), "{error}");
+        assert_eq!(error.expected(), Some(expected), "{error}");
+        assert_eq!(
+            error.source_name(),
+            Some("overlay"),
+            "the payload node from `overlay` must answer for `{path}`: {error}"
+        );
+        for text in [format!("{error}"), format!("{error:?}")] {
+            assert!(
+                !text.contains(INVALID),
+                "the payload reached the error: {text}"
+            );
+        }
+    }
 }
 
 #[test]
