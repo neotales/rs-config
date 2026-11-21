@@ -51,15 +51,17 @@ impl Case {
 /// `{"http": {"port": "8080"}}`. Without an explicit separator the builder's delimiter is used;
 /// [`Environment::flat`] keeps the whole remainder as one component.
 ///
-/// Selected names are sorted by their original spelling before they are mapped. When two names
-/// end at one path, the later name in that order wins, so `APP_A` and `APP_a` with
-/// [`Case::Lower`] resolve the same way whatever order the environment returned. Two names that
-/// would need one key to be both a scalar and a map reject the source instead.
+/// Selected names are sorted by their original spelling before they are mapped. Two distinct names
+/// that end at one path, such as `APP_A` and `APP_a` with [`Case::Lower`], therefore resolve the
+/// same way whatever order the environment returned: the later name wins. Two pairs with the
+/// identical name reject the source instead, because which of them would win is exactly that
+/// order. Two names that would need one key to be both a scalar and a map reject the source too.
 ///
 /// # Errors
 ///
-/// A non-Unicode name or value, an empty key, an empty path component, an empty separator, or a
-/// scalar/map conflict makes the source invalid. The error carries the kind only; it never
+/// A non-Unicode name or value, an empty key, an empty path component, an empty separator, a
+/// duplicate name, or a scalar/map conflict makes the source invalid. A duplicate name rejects the
+/// source even when the prefix selects neither copy. The error carries the kind only; it never
 /// carries a variable name or a value.
 ///
 /// # Examples
@@ -134,7 +136,9 @@ impl Environment {
     /// Uses a fixed set of pairs.
     ///
     /// This is how a caller supplies an environment snapshot without touching the process
-    /// environment. Values stay strings.
+    /// environment. Values stay strings. Two pairs with the same name reject the source when it
+    /// loads, even when the prefix selects neither copy: the winner would otherwise depend on the
+    /// order the pairs were supplied in.
     #[must_use]
     pub fn from_pairs<K, V>(pairs: impl IntoIterator<Item = (K, V)>) -> Self
     where
@@ -162,7 +166,7 @@ impl Environment {
     /// Splits a selected key on `separator` into nested maps.
     ///
     /// An explicit separator overrides the builder's delimiter. An empty separator rejects the
-    /// source when it loads.
+    /// source when it loads, even when no name is selected.
     #[must_use]
     pub fn separator(mut self, separator: impl Into<String>) -> Self {
         self.keys = self.keys.separator(separator);
@@ -188,9 +192,10 @@ impl Environment {
 
     /// Uses `delimiter` as the default key separator.
     ///
-    /// [`crate::Builder::environment`] calls this with the builder's delimiter. Registering the
-    /// source through [`crate::Builder::source`] does not, so that path keeps `.` unless an
-    /// explicit separator or [`Self::flat`] is used.
+    /// [`crate::Builder::environment`] replaces it with the builder's final delimiter when the
+    /// snapshot is built, whatever order the two calls were made in. Registering the source
+    /// through [`crate::Builder::source`] keeps this value; that path keeps `.` unless this
+    /// method, an explicit separator, or [`Self::flat`] is used.
     #[must_use]
     pub fn delimiter(mut self, delimiter: char) -> Self {
         self.keys = self.keys.delimiter(delimiter);
@@ -205,10 +210,21 @@ impl Environment {
     }
 
     fn build(&self) -> Result<Value, SourceError> {
+        // Check the policy before the pairs are read: an empty separator is a caller error even
+        // when the environment holds no selected name.
+        self.keys.validate().map_err(|_| SourceError::invalid())?;
+
         // Sorting makes a collision after case folding visible in one fixed order, whatever order
         // the environment or the caller supplied.
         let mut pairs = self.read_pairs()?;
         pairs.sort_by(|left, right| left.0.cmp(&right.0));
+
+        // Two pairs with the same original name wait for the caller's iteration order to decide
+        // which value wins, so reject rather than pick one. The check runs before the prefix is
+        // applied: an ambiguous pair set is rejected even when the prefix selects neither name.
+        if pairs.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(SourceError::invalid());
+        }
 
         let mut root = BTreeMap::new();
         for (name, value) in pairs {

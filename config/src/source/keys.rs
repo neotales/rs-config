@@ -87,6 +87,18 @@ impl Keys {
         }
         Ok(Some(components))
     }
+
+    /// Checks the policy on its own, before any name is mapped.
+    ///
+    /// A provider calls this first so an empty separator is reported even when it has no name to
+    /// map: an empty argument vector, an empty dotenv file, or a prefix that selects nothing must
+    /// not turn a caller error into a silent empty source.
+    pub(crate) fn validate(&self) -> Result<(), KeyError> {
+        match self.separator.as_deref() {
+            Some("") => Err(KeyError),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// Inserts a scalar at `components`.
@@ -129,8 +141,12 @@ pub(crate) fn insert(
 
 #[cfg(test)]
 mod tests {
-    use super::{KeyError, Keys, insert};
+    use super::{KeyError, insert};
     use crate::Value;
+
+    // Every test that builds a `Keys` also needs a prefix, so it is gated on those features.
+    #[cfg(any(feature = "environment", feature = "dotenv"))]
+    use super::Keys;
 
     #[cfg(any(feature = "environment", feature = "dotenv"))]
     #[test]

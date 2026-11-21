@@ -27,14 +27,16 @@ use super::{
 /// A selected key is split into path components. With [`Self::prefix`] `APP_`, the builder's
 /// delimiter `.`, and a file containing `APP_http.port=8080`, the result is the nested map
 /// `{"http": {"port": "8080"}}`. A later assignment to the same path wins; a line that is not an
-/// assignment, an empty key, an empty path component, a non-UTF-8 file, and a scalar/map
-/// conflict each reject the source.
+/// assignment, an empty key, an empty path component, an empty separator, a non-UTF-8 file, and a
+/// scalar/map conflict each reject the source.
 ///
 /// # Errors
 ///
 /// Returns [`SourceError::unavailable`] when the file cannot be read and
-/// [`SourceError::invalid`] when it is not UTF-8 or does not parse. The error carries the kind
-/// only; it never carries a path, a line, or a value.
+/// [`SourceError::invalid`] when it is not UTF-8 or does not parse. The key policy is checked
+/// before the file is opened, so an empty separator is invalid even when the file is missing or
+/// holds no assignment. The error carries the kind only; it never carries a path, a line, or a
+/// value.
 ///
 /// # Examples
 ///
@@ -98,7 +100,7 @@ impl DotenvFile {
     /// Splits a selected key on `separator` into nested maps.
     ///
     /// An explicit separator overrides the builder's delimiter. An empty separator rejects the
-    /// source when it loads.
+    /// source when it loads, even when the file holds no selected assignment.
     #[must_use]
     pub fn separator(mut self, separator: impl Into<String>) -> Self {
         self.keys = self.keys.separator(separator);
@@ -114,9 +116,10 @@ impl DotenvFile {
 
     /// Uses `delimiter` as the default key separator.
     ///
-    /// [`crate::Builder::dotenv_file`] calls this with the builder's delimiter. Registering the
-    /// source through [`crate::Builder::source`] does not, so that path keeps `.` unless an
-    /// explicit separator or [`Self::flat`] is used.
+    /// [`crate::Builder::dotenv_file`] replaces it with the builder's final delimiter when the
+    /// snapshot is built, whatever order the two calls were made in. Registering the source
+    /// through [`crate::Builder::source`] keeps this value; that path keeps `.` unless this
+    /// method, an explicit separator, or [`Self::flat`] is used.
     #[must_use]
     pub fn delimiter(mut self, delimiter: char) -> Self {
         self.keys = self.keys.delimiter(delimiter);
@@ -132,6 +135,10 @@ impl DotenvFile {
     }
 
     fn build(&self) -> Result<Value, SourceError> {
+        // Check the policy before the file is read: an empty separator is a caller error even when
+        // the file is empty or the prefix selects none of its assignments.
+        self.keys.validate().map_err(|_| SourceError::invalid())?;
+
         let bytes = std::fs::read(&self.path).map_err(|_| SourceError::unavailable())?;
         let text = String::from_utf8(bytes).map_err(|_| SourceError::invalid())?;
         let document = neotales_dotenv::parse(&text);

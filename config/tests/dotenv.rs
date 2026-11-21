@@ -8,7 +8,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use neotales_config::{Builder, DotenvFile, SourceErrorKind};
+use neotales_config::{Builder, DotenvFile, SourceErrorKind, Value};
 
 /// Distinctive enough that a leak into an error is visible.
 const SECRET: &str = "fixture-secret-9f3a2c";
@@ -92,6 +92,94 @@ fn a_custom_builder_delimiter_is_the_default_key_separator() {
         .expect("the dotenv source builds");
 
     assert_eq!(config.get::<String>("http:port").unwrap(), "8080");
+}
+
+#[test]
+fn the_final_builder_delimiter_applies_in_either_registration_order() {
+    // The implicit separator is the delimiter the builder ends up with, not the one it had when
+    // the source was registered.
+    let file = Fixture::new(b"APP_http:port=8080\nAPP_http.port=9090\n");
+    for config in [
+        Builder::new()
+            .dotenv_file("dotenv", DotenvFile::new(file.path()).prefix("APP_"))
+            .delimiter(':')
+            .build(),
+        Builder::new()
+            .delimiter(':')
+            .dotenv_file("dotenv", DotenvFile::new(file.path()).prefix("APP_"))
+            .build(),
+    ] {
+        let config = config.expect("the dotenv source builds");
+        assert_eq!(config.get::<String>("http:port").unwrap(), "8080");
+        assert_eq!(config.get::<String>("http.port").unwrap(), "9090");
+    }
+}
+
+#[test]
+fn an_explicit_separator_survives_a_builder_delimiter_in_either_order() {
+    let file = Fixture::new(b"APP_http__port=8080\n");
+    for config in [
+        Builder::new()
+            .dotenv_file(
+                "dotenv",
+                DotenvFile::new(file.path()).prefix("APP_").separator("__"),
+            )
+            .delimiter(':')
+            .build(),
+        Builder::new()
+            .delimiter(':')
+            .dotenv_file(
+                "dotenv",
+                DotenvFile::new(file.path()).prefix("APP_").separator("__"),
+            )
+            .build(),
+    ] {
+        assert_eq!(
+            config
+                .expect("the dotenv source builds")
+                .get::<String>("http:port")
+                .unwrap(),
+            "8080"
+        );
+    }
+}
+
+#[test]
+fn flat_survives_a_builder_delimiter_in_either_order() {
+    let file = Fixture::new(b"APP_http:port=8080\n");
+    for config in [
+        Builder::new()
+            .dotenv_file("dotenv", DotenvFile::new(file.path()).prefix("APP_").flat())
+            .delimiter(':')
+            .build(),
+        Builder::new()
+            .delimiter(':')
+            .dotenv_file("dotenv", DotenvFile::new(file.path()).prefix("APP_").flat())
+            .build(),
+    ] {
+        let config = config.expect("the dotenv source builds");
+        let root = config.value().expect("the root is present");
+        assert_eq!(
+            root.as_map().expect("the root is a map").get("http:port"),
+            Some(&Value::from("8080"))
+        );
+    }
+}
+
+#[test]
+fn an_empty_separator_is_invalid_even_when_nothing_is_selected() {
+    for contents in [&b""[..], &b"IGNORED=1\n"[..]] {
+        let file = Fixture::new(contents);
+        let error = Builder::new()
+            .dotenv_file(
+                "dotenv",
+                DotenvFile::new(file.path()).prefix("APP_").separator(""),
+            )
+            .build()
+            .expect_err("an empty separator is a caller error");
+
+        assert_eq!(error.source_kind(), Some(SourceErrorKind::Invalid));
+    }
 }
 
 #[test]

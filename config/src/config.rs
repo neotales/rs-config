@@ -11,9 +11,12 @@ use serde::de::DeserializeOwned;
 use crate::{
     de::{Cursor, DeError, Node},
     error::{Error, SUPPORTED_DELIMITERS},
-    source::{PendingSource, Source},
+    source::{PendingSource, ResolvedSource, Source},
     value::Value,
 };
+
+#[cfg(any(feature = "args", feature = "environment", feature = "dotenv"))]
+use crate::source::Deferred;
 
 /// The source name reported for a node that no source wrote. Only the root has no source, and the
 /// root is not addressable by a path, so this is not observable through [`Config::origin`].
@@ -96,6 +99,10 @@ impl Builder {
     /// A top-level key whose name is literally `http.port` is not selected by it, and a missing
     /// nested map is [`Error::is_missing`], not the literal key.
     ///
+    /// A provider registered through `arguments`, `environment`, or `dotenv_file` takes the final
+    /// value as its default key separator, whatever order the registration and this method are
+    /// called in. A source registered through [`Builder::source`] keeps its own policy.
+    ///
     /// ```
     /// use neotales_config::{Builder, Value};
     ///
@@ -132,37 +139,48 @@ impl Builder {
 
     /// Registers a process argument source. Requires the `args` feature.
     ///
-    /// The provider receives the builder's delimiter as its default key separator, so
-    /// `--http.port=8080` maps to `http` then `port` under the default `.` and to one literal key
-    /// under a custom delimiter unless [`crate::Arguments::separator`] is set explicitly. See
+    /// The provider receives the builder's final delimiter as its default key separator, whatever
+    /// order this method and [`Builder::delimiter`] are called in: `--http.port=8080` maps to
+    /// `http` then `port` under the default `.`, and to one literal key under a custom delimiter
+    /// unless [`crate::Arguments::separator`] or [`crate::Arguments::flat`] is chosen. See
     /// [`crate::Arguments`] for the accepted switches and errors.
     #[cfg(feature = "args")]
     #[must_use]
     pub fn arguments(self, name: impl Into<String>, arguments: crate::Arguments) -> Self {
-        let delimiter = self.delimiter;
-        self.source(name, arguments.delimiter(delimiter))
+        self.provider(name, Deferred::Arguments(arguments))
     }
 
     /// Registers a process environment source. Requires the `environment` feature.
     ///
-    /// The provider receives the builder's delimiter as its default key separator. See
-    /// [`crate::Environment`] for prefix, case, collision, and error behavior.
+    /// The provider receives the builder's final delimiter as its default key separator, whatever
+    /// order this method and [`Builder::delimiter`] are called in. See [`crate::Environment`] for
+    /// prefix, case, collision, duplicate, and error behavior.
     #[cfg(feature = "environment")]
     #[must_use]
     pub fn environment(self, name: impl Into<String>, environment: crate::Environment) -> Self {
-        let delimiter = self.delimiter;
-        self.source(name, environment.delimiter(delimiter))
+        self.provider(name, Deferred::Environment(environment))
     }
 
     /// Registers a dotenv file source. Requires the `dotenv` feature.
     ///
-    /// The provider receives the builder's delimiter as its default key separator. The file is
-    /// read at build and the process environment is never changed. See [`crate::DotenvFile`].
+    /// The provider receives the builder's final delimiter as its default key separator, whatever
+    /// order this method and [`Builder::delimiter`] are called in. The file is read at build and
+    /// the process environment is never changed. See [`crate::DotenvFile`].
     #[cfg(feature = "dotenv")]
     #[must_use]
     pub fn dotenv_file(self, name: impl Into<String>, file: crate::DotenvFile) -> Self {
-        let delimiter = self.delimiter;
-        self.source(name, file.delimiter(delimiter))
+        self.provider(name, Deferred::DotenvFile(file))
+    }
+
+    /// Registers a built-in provider whose default key separator is the builder's final delimiter.
+    ///
+    /// The delimiter is applied at build, not here, so registration order cannot decide the
+    /// separator.
+    #[cfg(any(feature = "args", feature = "environment", feature = "dotenv"))]
+    fn provider(mut self, name: impl Into<String>, provider: Deferred) -> Self {
+        self.sources
+            .push(PendingSource::deferred(name.into(), provider));
+        self
     }
 
     /// Registers a caller-supplied source in precedence order.
@@ -179,18 +197,16 @@ impl Builder {
     /// A source is loaded once, at build. It is not called again for the life of the snapshot.
     #[must_use]
     pub fn source(mut self, name: impl Into<String>, source: impl Source + 'static) -> Self {
-        self.sources.push(PendingSource {
-            name: name.into(),
-            source: Box::new(source),
-        });
+        self.sources.push(PendingSource::ready(name.into(), source));
         self
     }
 
     /// Builds the fixed immutable snapshot.
     ///
-    /// The delimiter is checked first, then source names, then every source is loaded in
-    /// registration order before any value is merged. A source may therefore fail without a
-    /// partial result being observable, and a bad delimiter fails before a source is loaded.
+    /// The delimiter is checked first, then source names, then the delimiter is applied to every
+    /// registered provider before any of them is loaded. Sources are loaded in registration order
+    /// before any value is merged. A source may therefore fail without a partial result being
+    /// observable, and a bad delimiter fails before a source is loaded.
     ///
     /// # Errors
     ///
@@ -205,18 +221,26 @@ impl Builder {
         check_names(&self.sources)?;
         let Self { sources, delimiter } = self;
 
+        // Resolve the delimiter before loading: a built-in provider's default key separator is the
+        // builder's final delimiter, so registration order relative to `delimiter` cannot change
+        // how its keys are split.
+        let sources: Vec<ResolvedSource> = sources
+            .into_iter()
+            .map(|pending| pending.resolve(delimiter))
+            .collect();
+
         // Load and check every source before merging any of them. A source that fails therefore
         // cannot leave a partially merged tree to reason about.
         let mut roots = Vec::with_capacity(sources.len());
-        for pending in &sources {
-            let value = pending
+        for source in &sources {
+            let value = source
                 .load()
-                .map_err(|error| Error::from_source(pending.name.as_str(), error))?;
+                .map_err(|error| Error::from_source(source.name.as_str(), error))?;
             if !value.is_representable() {
-                return Err(Error::unrepresentable(pending.name.as_str()));
+                return Err(Error::unrepresentable(source.name.as_str()));
             }
             let Value::Map(root) = value else {
-                return Err(Error::root_not_map(pending.name.as_str()));
+                return Err(Error::root_not_map(source.name.as_str()));
             };
             roots.push(root);
         }
@@ -225,9 +249,9 @@ impl Builder {
             value: Value::Map(BTreeMap::new()),
             origin: BTreeMap::new(),
         };
-        for (pending, root) in sources.iter().zip(roots) {
-            let source: Arc<str> = Arc::from(pending.name.as_str());
-            merge_root(&mut snapshot, root, &source);
+        for (source, root) in sources.iter().zip(roots) {
+            let name: Arc<str> = Arc::from(source.name.as_str());
+            merge_root(&mut snapshot, root, &name);
         }
         Ok(Config::root(Arc::new(snapshot), delimiter))
     }

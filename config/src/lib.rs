@@ -39,8 +39,9 @@
 //! | `dotenv` | `DotenvFile` | `neotales-dotenv` |
 //!
 //! No feature is on by default. A provider value stays a string unless it is an argv boolean, and
-//! no provider writes to the process environment. The dedicated builder methods pass the
-//! builder's delimiter to the provider as its default key separator.
+//! no provider writes to the process environment. The dedicated builder methods apply the
+//! builder's final delimiter as the provider's default key separator, whatever order the
+//! registration and the delimiter were given in.
 //!
 //! There is no file-format, reload, vault, or remote provider in this release.
 //!

@@ -83,6 +83,89 @@ fn a_custom_builder_delimiter_is_the_default_key_separator() {
 }
 
 #[test]
+fn the_final_builder_delimiter_applies_in_either_registration_order() {
+    // The implicit separator is the delimiter the builder ends up with, not the one it had when
+    // the source was registered: `.arguments(..).delimiter(':')` and `.delimiter(':').arguments`
+    // must produce the same tree.
+    for config in [
+        Builder::new()
+            .arguments(
+                "arguments",
+                Arguments::new(tokens(&["--http:port=8080", "--http.port=9090"])),
+            )
+            .delimiter(':')
+            .build(),
+        Builder::new()
+            .delimiter(':')
+            .arguments(
+                "arguments",
+                Arguments::new(tokens(&["--http:port=8080", "--http.port=9090"])),
+            )
+            .build(),
+    ] {
+        let config = config.expect("the arguments source builds");
+        assert_eq!(config.get::<String>("http:port").unwrap(), "8080");
+        assert_eq!(config.get::<String>("http.port").unwrap(), "9090");
+    }
+}
+
+#[test]
+fn an_explicit_separator_survives_a_builder_delimiter_in_either_order() {
+    for config in [
+        Builder::new()
+            .arguments(
+                "arguments",
+                Arguments::new(tokens(&["--http__port=8080"])).separator("__"),
+            )
+            .delimiter(':')
+            .build(),
+        Builder::new()
+            .delimiter(':')
+            .arguments(
+                "arguments",
+                Arguments::new(tokens(&["--http__port=8080"])).separator("__"),
+            )
+            .build(),
+    ] {
+        assert_eq!(
+            config
+                .expect("the arguments source builds")
+                .get::<String>("http:port")
+                .unwrap(),
+            "8080"
+        );
+    }
+}
+
+#[test]
+fn flat_survives_a_builder_delimiter_in_either_order() {
+    for config in [
+        Builder::new()
+            .arguments(
+                "arguments",
+                Arguments::new(tokens(&["--http:port=8080"])).flat(),
+            )
+            .delimiter(':')
+            .build(),
+        Builder::new()
+            .delimiter(':')
+            .arguments(
+                "arguments",
+                Arguments::new(tokens(&["--http:port=8080"])).flat(),
+            )
+            .build(),
+    ] {
+        let config = config.expect("the arguments source builds");
+        let root = config.value().expect("the root is present");
+        assert_eq!(
+            root.as_map().expect("the root is a map").get("http:port"),
+            Some(&Value::from("8080")),
+            "a flat key keeps its separator as part of the name"
+        );
+    }
+}
+
+#[test]
 fn an_explicit_separator_overrides_the_builder_delimiter() {
     let config = Builder::new()
         .delimiter(':')
@@ -203,4 +286,37 @@ fn the_source_value_is_a_map() {
     let arguments = Arguments::new(Vec::<OsString>::new());
     let value = arguments.load().expect("an empty vector loads");
     assert_eq!(value, Value::map(std::iter::empty::<(String, Value)>()));
+}
+
+#[test]
+fn an_empty_separator_is_invalid_even_with_no_switch() {
+    for arguments in [
+        Arguments::new(Vec::<OsString>::new()).separator(""),
+        // An empty separator chosen after `flat()` wins, so this order is invalid too.
+        Arguments::new(tokens(&["--port=1"])).flat().separator(""),
+    ] {
+        let error = Builder::new()
+            .arguments("arguments", arguments)
+            .build()
+            .expect_err("an empty separator is a caller error");
+        assert_eq!(error.source_kind(), Some(SourceErrorKind::Invalid));
+    }
+}
+
+#[test]
+fn flat_clears_an_empty_separator_chosen_before_it() {
+    let config = Builder::new()
+        .arguments(
+            "arguments",
+            Arguments::new(tokens(&["--http:port=8080"]))
+                .separator("")
+                .flat(),
+        )
+        .build()
+        .expect("flat replaces the empty separator");
+    let root = config.value().expect("the root is present");
+    assert_eq!(
+        root.as_map().expect("the root is a map").get("http:port"),
+        Some(&Value::from("8080"))
+    );
 }

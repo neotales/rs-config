@@ -20,6 +20,41 @@ pub use self::dotenv_file::DotenvFile;
 #[cfg(feature = "environment")]
 pub use self::environment::{Case, Environment};
 
+/// A built-in provider that waits for the builder's final delimiter.
+///
+/// A provider registered through [`crate::Builder::arguments`],
+/// [`crate::Builder::environment`], or [`crate::Builder::dotenv_file`] takes the builder's
+/// delimiter as its default key separator. The delimiter is applied at build rather than at
+/// registration, so `.arguments(..).delimiter(':')` and `.delimiter(':').arguments(..)` split keys
+/// the same way.
+#[cfg(any(feature = "args", feature = "environment", feature = "dotenv"))]
+pub(crate) enum Deferred {
+    #[cfg(feature = "args")]
+    Arguments(Arguments),
+    #[cfg(feature = "dotenv")]
+    DotenvFile(DotenvFile),
+    #[cfg(feature = "environment")]
+    Environment(Environment),
+}
+
+#[cfg(any(feature = "args", feature = "environment", feature = "dotenv"))]
+impl Deferred {
+    /// Applies `delimiter` as the provider's default key separator.
+    ///
+    /// An explicit separator or a flat key policy is kept: the delimiter only supplies the default
+    /// the provider would otherwise take from `.`.
+    fn into_source(self, delimiter: char) -> Box<dyn Source> {
+        match self {
+            #[cfg(feature = "args")]
+            Self::Arguments(source) => Box::new(source.delimiter(delimiter)),
+            #[cfg(feature = "dotenv")]
+            Self::DotenvFile(source) => Box::new(source.delimiter(delimiter)),
+            #[cfg(feature = "environment")]
+            Self::Environment(source) => Box::new(source.delimiter(delimiter)),
+        }
+    }
+}
+
 /// A caller-supplied configuration source.
 ///
 /// Register one with [`crate::Builder::source`]. [`Source::load`] returns a complete value tree
@@ -64,12 +99,56 @@ where
 /// One source waiting for [`crate::Builder::build`].
 pub(crate) struct PendingSource {
     pub(crate) name: String,
-    pub(crate) source: Box<dyn Source>,
+    source: Pending,
+}
+
+/// A registered source, before the builder's final delimiter is known.
+enum Pending {
+    Ready(Box<dyn Source>),
+    #[cfg(any(feature = "args", feature = "environment", feature = "dotenv"))]
+    Deferred(Deferred),
 }
 
 impl PendingSource {
-    pub(crate) fn load(&self) -> Result<Value, SourceError> {
-        self.source.load()
+    /// Registers a source that is used exactly as supplied.
+    pub(crate) fn ready(name: String, source: impl Source + 'static) -> Self {
+        Self {
+            name,
+            source: Pending::Ready(Box::new(source)),
+        }
+    }
+
+    /// Registers a built-in provider that takes the builder's final delimiter at build.
+    #[cfg(any(feature = "args", feature = "environment", feature = "dotenv"))]
+    pub(crate) fn deferred(name: String, provider: Deferred) -> Self {
+        Self {
+            name,
+            source: Pending::Deferred(provider),
+        }
+    }
+
+    /// Applies the builder's final delimiter to a provider that waits for one.
+    ///
+    /// This runs at build, not at registration, so the key separator is the delimiter the builder
+    /// ends up with whatever order the registration and [`crate::Builder::delimiter`] were called
+    /// in.
+    #[cfg_attr(
+        not(any(feature = "args", feature = "environment", feature = "dotenv")),
+        allow(
+            unused_variables,
+            reason = "no provider feature is compiled in, so no source can defer a delimiter"
+        )
+    )]
+    pub(crate) fn resolve(self, delimiter: char) -> ResolvedSource {
+        let Self { name, source } = self;
+        match source {
+            Pending::Ready(source) => ResolvedSource { name, source },
+            #[cfg(any(feature = "args", feature = "environment", feature = "dotenv"))]
+            Pending::Deferred(provider) => ResolvedSource {
+                name,
+                source: provider.into_source(delimiter),
+            },
+        }
     }
 }
 
@@ -83,5 +162,22 @@ impl fmt::Debug for PendingSource {
             .debug_struct("PendingSource")
             .field("name", &self.name)
             .finish()
+    }
+}
+
+/// A source with the builder's final delimiter already applied, ready to load.
+pub(crate) struct ResolvedSource {
+    pub(crate) name: String,
+    source: Box<dyn Source>,
+}
+
+impl ResolvedSource {
+    /// Loads the source once.
+    ///
+    /// # Errors
+    ///
+    /// Returns whatever the source reports; the builder attaches the registered name.
+    pub(crate) fn load(&self) -> Result<Value, SourceError> {
+        self.source.load()
     }
 }

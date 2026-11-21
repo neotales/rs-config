@@ -112,7 +112,7 @@ impl Arguments {
     /// Splits a switch key on `separator` into nested maps.
     ///
     /// An explicit separator overrides the builder's delimiter. An empty separator rejects the
-    /// source when it loads.
+    /// source when it loads, even when the vector holds no switch at all.
     #[must_use]
     pub fn separator(mut self, separator: impl Into<String>) -> Self {
         self.keys = self.keys.separator(separator);
@@ -128,9 +128,10 @@ impl Arguments {
 
     /// Uses `delimiter` as the default key separator.
     ///
-    /// [`crate::Builder::arguments`] calls this with the builder's delimiter. Registering the
-    /// source through [`crate::Builder::source`] does not, so that path keeps `.` unless an
-    /// explicit separator or [`Self::flat`] is used.
+    /// [`crate::Builder::arguments`] replaces it with the builder's final delimiter when the
+    /// snapshot is built, whatever order the two calls were made in. Registering the source
+    /// through [`crate::Builder::source`] keeps this value; that path keeps `.` unless this
+    /// method, an explicit separator, or [`Self::flat`] is used.
     #[must_use]
     pub fn delimiter(mut self, delimiter: char) -> Self {
         self.keys = self.keys.delimiter(delimiter);
@@ -138,6 +139,10 @@ impl Arguments {
     }
 
     fn build(&self) -> Result<Value, SourceError> {
+        // Check the policy before the first token: an empty separator is a caller error even for
+        // an empty vector, which selects no key at all.
+        self.keys.validate().map_err(|_| SourceError::invalid())?;
+
         let mut root = BTreeMap::new();
         for token in &self.argv {
             let Some(token) = token.to_str() else {
