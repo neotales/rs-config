@@ -58,13 +58,11 @@ jobs:
       - name: Package without publishing
         run: cargo publish -p neotales-config --dry-run --locked
 
-      # The provider's package cannot be verified until `neotales-config`
-      # 0.0.0-alpha.0 is on crates.io: a verifying package resolves that
-      # dependency from the registry, not from this checkout. Build the archive
-      # without verification so the manifest and file list are still checked;
-      # `cargo publish` in the publish job verifies it after the core upload.
-      - name: Package the vault provider without publishing
-        run: cargo package -p neotales-config-keepass --no-verify --locked
+      # `neotales-config-keepass` cannot be packaged here. Cargo resolves its
+      # `neotales-config` dependency from crates.io while preparing the package,
+      # even with `--no-verify`, and that version is not published yet. The
+      # publish job publishes the core first; the provider's `cargo publish`
+      # then performs the verification against the uploaded core.
 
   version:
     name: tag matches the crate version

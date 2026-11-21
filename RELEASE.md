@@ -82,9 +82,11 @@ crate README, its licence, its docs, and its tests ship inside its published cra
 repository, not to a crate. The README style guide lives at `~/work/rs/README.STYLE.md` and is not
 part of a crate.
 
-A verifying `cargo package -p neotales-config-keepass` needs the core's version on crates.io. Until
-the core is uploaded, the local gate is `cargo package -p neotales-config-keepass --no-verify`,
-which still checks the manifest and the file list. Do not record that as a publishable package.
+A `cargo package -p neotales-config-keepass`, with or without verification, needs the core's version
+on crates.io. Cargo resolves the path dependency from the registry while preparing the package, so
+there is no local packaging gate for the provider before the core has been uploaded. Until then, the
+gate is the workspace build and test plus the provider's `cargo publish` in the publish job, which
+runs after the core upload. Do not record a failed package as a pass.
 
 ## Later releases
 
@@ -123,4 +125,4 @@ cannot publish that crate later.
 | Publish job: version already uploaded | The version was published before, usually by the manual first release. Bump the version. |
 | Publish job: `cargo publish` rejects the token | Trusted Publishing Only mode is on and the crate has no trusted publisher configured. |
 | Provider publish: `neotales-config` version not found | The core version is not on crates.io yet. Publish the core first; this is why the two crates share a version and publish in dependency order. |
-| `cargo package -p neotales-config-keepass` cannot verify | The core version is not on crates.io. That is the expected local state before the first upload; use `--no-verify` to check the manifest and file list, and do not call the result publishable. |
+| `cargo package -p neotales-config-keepass` cannot verify | The core version is not on crates.io. Cargo resolves the path dependency from the registry while preparing the package, even with `--no-verify`, so the local state before the first upload cannot produce a package. The publish job uploads the core first. |
