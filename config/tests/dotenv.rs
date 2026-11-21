@@ -670,3 +670,158 @@ fn a_looked_up_value_is_not_expanded_again() {
 
     assert_eq!(config.get::<String>("VALUE").unwrap(), "$HOME");
 }
+
+#[test]
+fn a_nested_default_is_split_at_the_outer_operator() {
+    // `neotales-env` reads a braced token with brace awareness but splits it with a plain substring
+    // search for `:-`, so the inner operator used to be taken for the outer one. The outer operator
+    // here is the first `:` outside the nested reference, whether it is written `:` or `:-`.
+    let file = Fixture::new(
+        b"APP_SET=${OUTER:${INNER:-inner-default}}\nAPP_UNSET=${MISSING_OUTER:${INNER:-inner-default}}\nAPP_CONVENTIONAL=${MISSING_OUTER:-${INNER:-inner-default}}\nAPP_DOUBLE=\"${MISSING_OUTER:${INNER:-inner-default}}\"\nAPP_SINGLE='${MISSING_OUTER:${INNER:-inner-default}}'\n",
+    );
+    let config = Builder::new()
+        .dotenv_file(
+            "dotenv",
+            DotenvFile::new(file.path())
+                .prefix("APP_")
+                .with_environment([("OUTER", "outer-value"), ("INNER", "inner-value")]),
+        )
+        .build()
+        .expect("the dotenv source builds");
+
+    assert_eq!(config.get::<String>("SET").unwrap(), "outer-value");
+    assert_eq!(config.get::<String>("UNSET").unwrap(), "inner-value");
+    assert_eq!(config.get::<String>("CONVENTIONAL").unwrap(), "inner-value");
+    assert_eq!(config.get::<String>("DOUBLE").unwrap(), "inner-value");
+    assert_eq!(
+        config.get::<String>("SINGLE").unwrap(),
+        "${MISSING_OUTER:${INNER:-inner-default}}"
+    );
+}
+
+#[test]
+fn a_nested_default_resolves_through_several_depths() {
+    let file = Fixture::new(
+        b"APP_DEEP=${NO_A:${NO_B:${NO_C:-deep}}}\nAPP_DEEP_INNER=${NO_A:${NO_B:${INNER:-deep}}}\n",
+    );
+    let config = Builder::new()
+        .dotenv_file(
+            "dotenv",
+            DotenvFile::new(file.path())
+                .prefix("APP_")
+                .with_environment([("INNER", "inner-value")]),
+        )
+        .build()
+        .expect("the dotenv source builds");
+
+    assert_eq!(config.get::<String>("DEEP").unwrap(), "deep");
+    assert_eq!(config.get::<String>("DEEP_INNER").unwrap(), "inner-value");
+}
+
+#[test]
+fn a_present_outer_value_does_not_expand_a_nested_operand() {
+    // The operand holds a required reference that would reject the source. It is not evaluated
+    // when the outer value is present, so the source still builds.
+    let file = Fixture::new(format!(
+        "APP_VALUE=${{OUTER:${{NEOTALES_CONFIG_DOTENV_MISSING_9F3A2C:?{SECRET}}}}}\n"
+    ));
+    let config = Builder::new()
+        .dotenv_file(
+            "dotenv",
+            DotenvFile::new(file.path())
+                .prefix("APP_")
+                .with_environment([("OUTER", "outer-value")]),
+        )
+        .build()
+        .expect("a present value short-circuits its operand");
+
+    assert_eq!(config.get::<String>("VALUE").unwrap(), "outer-value");
+}
+
+#[test]
+fn a_nested_assign_writes_the_local_scope() {
+    const NAME: &str = "NEOTALES_CONFIG_DOTENV_NESTED_LOCAL_9F3A2C";
+    assert!(
+        std::env::var_os(NAME).is_none(),
+        "the test name is already present in the environment"
+    );
+
+    let file = Fixture::new(format!(
+        "APP_FIRST=${{NO_OUTER:-${{{NAME}:=nested-set}}}}\nAPP_SECOND=${NAME}\nAPP_PLAIN=${{NO_OUTER:${{{NAME}_PLAIN:=plain-set}}}}\nAPP_PLAIN_LATER=${{{NAME}_PLAIN}}\n"
+    ));
+    let config = Builder::new()
+        .dotenv_file("dotenv", DotenvFile::new(file.path()).prefix("APP_"))
+        .build()
+        .expect("the dotenv source builds");
+
+    assert_eq!(config.get::<String>("FIRST").unwrap(), "nested-set");
+    assert_eq!(config.get::<String>("SECOND").unwrap(), "nested-set");
+    assert_eq!(config.get::<String>("PLAIN").unwrap(), "plain-set");
+    assert_eq!(config.get::<String>("PLAIN_LATER").unwrap(), "plain-set");
+    assert!(!config.has("NO_OUTER").unwrap());
+    assert!(
+        std::env::var_os(NAME).is_none(),
+        "the nested setter touched the process environment"
+    );
+    assert!(
+        std::env::var_os(format!("{NAME}_PLAIN")).is_none(),
+        "the nested setter touched the process environment"
+    );
+}
+
+#[test]
+fn an_outer_assign_with_a_nested_operand_stores_it_as_written() {
+    let file = Fixture::new(
+        b"APP_FIRST=${STORE_OUTER:=${INNER:-inner-default}}\nAPP_SECOND=$STORE_OUTER\n",
+    );
+    let config = Builder::new()
+        .dotenv_file(
+            "dotenv",
+            DotenvFile::new(file.path())
+                .prefix("APP_")
+                .with_environment([("INNER", "inner-value")]),
+        )
+        .build()
+        .expect("the dotenv source builds");
+
+    assert_eq!(
+        config.get::<String>("FIRST").unwrap(),
+        "${INNER:-inner-default}"
+    );
+    assert_eq!(
+        config.get::<String>("SECOND").unwrap(),
+        "${INNER:-inner-default}"
+    );
+}
+
+#[test]
+fn a_nested_required_reference_rejects_without_its_message() {
+    // One failure is inside the operand of a default; the other is the operand of an outer
+    // required reference, which is discarded without being expanded.
+    let cases = [
+        format!("APP_VALUE=${{NO_OUTER:${{NEOTALES_CONFIG_DOTENV_MISSING_9F3A2C:?{SECRET}}}}}\n"),
+        format!(
+            "APP_VALUE=${{NEOTALES_CONFIG_DOTENV_MISSING_9F3A2C:?${{LEAK_SOURCE:-{SECRET}}}}}\n"
+        ),
+    ];
+    for contents in cases {
+        let file = Fixture::new(contents);
+        let error = Builder::new()
+            .dotenv_file(
+                "dotenv",
+                DotenvFile::new(file.path())
+                    .prefix("APP_")
+                    .with_environment([("UNRELATED", "value")]),
+            )
+            .build()
+            .expect_err("a missing required reference rejects the source");
+
+        assert_eq!(error.source_kind(), Some(SourceErrorKind::Invalid));
+        for text in [format!("{error}"), format!("{error:?}")] {
+            assert!(
+                !text.contains(SECRET),
+                "the required message reached the error: {text}"
+            );
+        }
+    }
+}
