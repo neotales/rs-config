@@ -269,6 +269,11 @@ Interpolation is on by default and is sequential:
 - A missing or empty name expands to an empty string. `${NAME:-text}` and `${NAME:text}` use
   `text`, and a reference inside that default is expanded; `${NAME:?text}` rejects the source and
   discards `text`, so it never reaches an error.
+- A reference may nest inside the `text` of a default, assign, or required operand, and the outer
+  operator is the first `:` outside a nested `${…}`. Nesting is bounded: more than
+  `DotenvFile::MAX_NESTING_DEPTH` (16) references open at once rejects the source as invalid before
+  expansion starts. A token whose braces are literal, or whose reference is escaped, is not a
+  nested reference and is handed to `neotales-env` unchanged.
 - An unbraced `$NAME` takes the longest run of letters, digits, and underscores, so `$HOMEtail`
   is the name `HOMEtail`; use `${HOME}tail` before another name character.
 - A looked-up value is inserted as-is. A `$` inside an earlier assignment's value or an environment

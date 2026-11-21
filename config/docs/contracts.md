@@ -4,7 +4,8 @@ This page states the behavior `neotales-config` 0.0.0-alpha.0 promises. The core
 caller-supplied sources. Process arguments, the process environment, a dotenv file, and six file
 formats are explicit, feature-gated providers. The optional `reload` feature adds a cloneable
 snapshot holder, manual refresh, change subscriptions, and an explicit polling watcher. Vault
-resolution is not part of this release.
+resolution is not part of this crate: it is the separate, opt-in `neotales-config-keepass` crate,
+which depends on the core and is released at the same version.
 
 ## Sources
 
