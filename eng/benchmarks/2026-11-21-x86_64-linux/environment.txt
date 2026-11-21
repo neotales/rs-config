@@ -1,0 +1,20 @@
+Recorded: 2026-11-21, local time UTC-06:00 (runs started 16:47, 16:52, 16:53, 16:55)
+Kernel: Linux 7.2.15-1-omarchy x86_64
+Distribution: Omarchy (Arch Linux), BUILD_ID 4.5.0
+CPU: Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz
+Logical CPUs: 12
+CPU scaling governor: powersave
+Memory: 62Gi total
+Temp filesystem: tmpfs (32G)
+rustc: rustc 1.100.0 (0ef1bc386 2026-11-09)
+cargo: cargo 1.100.0 (3acc79c0c 2026-11-05)
+Criterion: 0.8.2 (default features off: no plotters, no rayon, no gnuplot)
+Benchmark profile: Cargo's bench profile (release-derived); CARGO_INCREMENTAL=0 from rust-toolchain.toml
+Affinity: taskset -c 2
+Host load average readings during the session: 9.56 to 13.05 (shared machine, other sessions active)
+/proc/pressure/cpu "some avg10" at sampled points around the kept runs: 0.00 to 1.60
+Commands:
+  rm -rf target/criterion
+  taskset -c 2 cargo bench -p neotales-config --all-features --bench sources -- --sample-size 20 --warm-up-time 0.3 --measurement-time 0.8
+  rm -rf target/criterion
+  taskset -c 2 cargo bench -p neotales-config-keepass --all-features --bench keepass -- --sample-size 20 --warm-up-time 0.3 --measurement-time 0.8

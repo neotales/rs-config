@@ -1,0 +1,151 @@
+   Compiling neotales-config-keepass v0.0.0-alpha.0 (/home/dev/work/rs/config/keepass)
+    Finished `bench` profile [optimized] target(s) in 4.46s
+     Running benches/keepass.rs (target/release/build/neotales-config-keepass/0068bb4da51bd06e/out/keepass-0068bb4da51bd06e)
+Benchmarking keepass/small/read
+Benchmarking keepass/small/read: Warming up for 300.00 ms
+Benchmarking keepass/small/read: Collecting 20 samples in estimated 800.68 ms (206k iterations)
+Benchmarking keepass/small/read: Analyzing
+keepass/small/read      time:   [3.8937 µs 3.9510 µs 4.0159 µs]
+                        thrpt:  [837.58 MiB/s 851.34 MiB/s 863.86 MiB/s]
+Benchmarking keepass/small/codec-load
+Benchmarking keepass/small/codec-load: Warming up for 300.00 ms
+Benchmarking keepass/small/codec-load: Collecting 20 samples in estimated 804.53 ms (9450 iterations)
+Benchmarking keepass/small/codec-load: Analyzing
+keepass/small/codec-load
+                        time:   [72.589 µs 75.398 µs 78.689 µs]
+                        thrpt:  [42.746 MiB/s 44.611 MiB/s 46.338 MiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking keepass/small/load
+Benchmarking keepass/small/load: Warming up for 300.00 ms
+Benchmarking keepass/small/load: Collecting 20 samples in estimated 805.55 ms (10k iterations)
+Benchmarking keepass/small/load: Analyzing
+keepass/small/load      time:   [79.963 µs 83.362 µs 89.336 µs]
+                        thrpt:  [37.651 MiB/s 40.350 MiB/s 42.064 MiB/s]
+Found 4 outliers among 20 measurements (20.00%)
+  1 (5.00%) high mild
+  3 (15.00%) high severe
+Benchmarking keepass/small/build
+Benchmarking keepass/small/build: Warming up for 300.00 ms
+Benchmarking keepass/small/build: Collecting 20 samples in estimated 802.45 ms (8610 iterations)
+Benchmarking keepass/small/build: Analyzing
+keepass/small/build     time:   [104.33 µs 121.63 µs 139.17 µs]
+                        thrpt:  [24.169 MiB/s 27.654 MiB/s 32.239 MiB/s]
+
+Benchmarking keepass/small/refresh
+Benchmarking keepass/small/refresh: Warming up for 300.00 ms
+Benchmarking keepass/small/refresh: Collecting 20 samples in estimated 816.69 ms (8400 iterations)
+Benchmarking keepass/small/refresh: Analyzing
+keepass/small/refresh   time:   [96.078 µs 98.262 µs 100.34 µs]
+Benchmarking keepass/small/refresh-unchanged
+Benchmarking keepass/small/refresh-unchanged: Warming up for 300.00 ms
+Benchmarking keepass/small/refresh-unchanged: Collecting 20 samples in estimated 801.08 ms (112k iterations)
+Benchmarking keepass/small/refresh-unchanged: Analyzing
+keepass/small/refresh-unchanged
+                        time:   [7.0751 µs 7.1691 µs 7.2883 µs]
+Found 3 outliers among 20 measurements (15.00%)
+  2 (10.00%) high mild
+  1 (5.00%) high severe
+
+Benchmarking keepass/realistic/read
+Benchmarking keepass/realistic/read: Warming up for 300.00 ms
+Benchmarking keepass/realistic/read: Collecting 20 samples in estimated 800.09 ms (189k iterations)
+Benchmarking keepass/realistic/read: Analyzing
+keepass/realistic/read  time:   [3.9503 µs 3.9776 µs 4.0153 µs]
+                        thrpt:  [1.7718 GiB/s 1.7886 GiB/s 1.8010 GiB/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking keepass/realistic/codec-load
+Benchmarking keepass/realistic/codec-load: Warming up for 300.00 ms
+Benchmarking keepass/realistic/codec-load: Collecting 20 samples in estimated 936.57 ms (840 iterations)
+Benchmarking keepass/realistic/codec-load: Analyzing
+keepass/realistic/codec-load
+                        time:   [1.0954 ms 1.1223 ms 1.1693 ms]
+                        thrpt:  [6.2302 MiB/s 6.4910 MiB/s 6.6505 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+Benchmarking keepass/realistic/load
+Benchmarking keepass/realistic/load: Warming up for 300.00 ms
+Benchmarking keepass/realistic/load: Collecting 20 samples in estimated 984.32 ms (630 iterations)
+Benchmarking keepass/realistic/load: Analyzing
+keepass/realistic/load  time:   [1.4667 ms 1.4870 ms 1.5073 ms]
+                        thrpt:  [4.8331 MiB/s 4.8993 MiB/s 4.9669 MiB/s]
+Benchmarking keepass/realistic/build
+Benchmarking keepass/realistic/build: Warming up for 300.00 ms
+Benchmarking keepass/realistic/build: Collecting 20 samples in estimated 1.1180 s (630 iterations)
+Benchmarking keepass/realistic/build: Analyzing
+keepass/realistic/build time:   [1.6724 ms 1.7214 ms 1.7818 ms]
+                        thrpt:  [4.0886 MiB/s 4.2321 MiB/s 4.3560 MiB/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+
+Benchmarking keepass/realistic/refresh
+Benchmarking keepass/realistic/refresh: Warming up for 300.00 ms
+Benchmarking keepass/realistic/refresh: Collecting 20 samples in estimated 1.0639 s (630 iterations)
+Benchmarking keepass/realistic/refresh: Analyzing
+keepass/realistic/refresh
+                        time:   [1.7190 ms 1.7455 ms 1.7733 ms]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking keepass/realistic/refresh-unchanged
+Benchmarking keepass/realistic/refresh-unchanged: Warming up for 300.00 ms
+Benchmarking keepass/realistic/refresh-unchanged: Collecting 20 samples in estimated 800.39 ms (67k iterations)
+Benchmarking keepass/realistic/refresh-unchanged: Analyzing
+keepass/realistic/refresh-unchanged
+                        time:   [11.557 µs 11.640 µs 11.782 µs]
+Found 4 outliers among 20 measurements (20.00%)
+  1 (5.00%) high mild
+  3 (15.00%) high severe
+
+Benchmarking keepass/realistic-kdf-600000/read
+Benchmarking keepass/realistic-kdf-600000/read: Warming up for 200.00 ms
+Benchmarking keepass/realistic-kdf-600000/read: Collecting 10 samples in estimated 1.0002 s (242k iterations)
+Benchmarking keepass/realistic-kdf-600000/read: Analyzing
+keepass/realistic-kdf-600000/read
+                        time:   [4.0502 µs 4.1271 µs 4.2149 µs]
+                        thrpt:  [1.6950 GiB/s 1.7310 GiB/s 1.7639 GiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+Benchmarking keepass/realistic-kdf-600000/codec-load
+Benchmarking keepass/realistic-kdf-600000/codec-load: Warming up for 200.00 ms
+Benchmarking keepass/realistic-kdf-600000/codec-load: Collecting 10 samples in estimated 1.3815 s (110 iterations)
+Benchmarking keepass/realistic-kdf-600000/codec-load: Analyzing
+keepass/realistic-kdf-600000/codec-load
+                        time:   [12.279 ms 12.398 ms 12.649 ms]
+                        thrpt:  [592.26 KiB/s 604.20 KiB/s 610.08 KiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+Benchmarking keepass/realistic-kdf-600000/load
+Benchmarking keepass/realistic-kdf-600000/load: Warming up for 200.00 ms
+Benchmarking keepass/realistic-kdf-600000/load: Collecting 10 samples in estimated 1.4090 s (110 iterations)
+Benchmarking keepass/realistic-kdf-600000/load: Analyzing
+keepass/realistic-kdf-600000/load
+                        time:   [12.639 ms 12.724 ms 12.864 ms]
+                        thrpt:  [582.35 KiB/s 588.73 KiB/s 592.72 KiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+Benchmarking keepass/realistic-kdf-600000/build
+Benchmarking keepass/realistic-kdf-600000/build: Warming up for 200.00 ms
+Benchmarking keepass/realistic-kdf-600000/build: Collecting 10 samples in estimated 1.4325 s (110 iterations)
+Benchmarking keepass/realistic-kdf-600000/build: Analyzing
+keepass/realistic-kdf-600000/build
+                        time:   [13.176 ms 13.704 ms 14.258 ms]
+                        thrpt:  [525.40 KiB/s 546.64 KiB/s 568.54 KiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+
+Benchmarking keepass/realistic-kdf-600000/refresh
+Benchmarking keepass/realistic-kdf-600000/refresh: Warming up for 300.00 ms
+Benchmarking keepass/realistic-kdf-600000/refresh: Collecting 20 samples in estimated 820.25 ms (60 iterations)
+Benchmarking keepass/realistic-kdf-600000/refresh: Analyzing
+keepass/realistic-kdf-600000/refresh
+                        time:   [13.849 ms 13.972 ms 14.099 ms]
+Benchmarking keepass/realistic-kdf-600000/refresh-unchanged
+Benchmarking keepass/realistic-kdf-600000/refresh-unchanged: Warming up for 300.00 ms
+Benchmarking keepass/realistic-kdf-600000/refresh-unchanged: Collecting 20 samples in estimated 801.68 ms (67k iterations)
+Benchmarking keepass/realistic-kdf-600000/refresh-unchanged: Analyzing
+keepass/realistic-kdf-600000/refresh-unchanged
+                        time:   [11.684 µs 11.987 µs 12.335 µs]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
