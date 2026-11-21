@@ -138,9 +138,11 @@ stays a string.
 #### JSON5
 
 JSON5 1.0 accepts comments, trailing commas, single-quoted strings, unquoted member names,
-hexadecimal numbers, a unary plus, a bare leading or trailing decimal point, `Infinity`, `NaN`, and
-multi-line strings. `Infinity`, `-Infinity`, `NaN`, and a decimal literal that overflows to
-infinity are unrepresentable. Negative zero keeps its float kind.
+hexadecimal numbers, a unary plus, a bare leading or trailing decimal point, `Infinity`, `NaN`,
+multi-line strings, and the dialect's Unicode whitespace. That whitespace set is wider than ASCII:
+U+00A0, U+2028, U+2029, and U+FEFF are whitespace too, so `{ port:\u{00A0}8080 }` is valid.
+`Infinity`, `-Infinity`, `NaN`, and a decimal literal that overflows to infinity are
+unrepresentable. Negative zero keeps its float kind.
 
 #### JSONC
 
@@ -158,9 +160,11 @@ text; a typed read uses `DateTime`, never `String`. `nan`, `inf`, and `-inf` are
 #### YAML
 
 The dialect is YAML 1.2 core schema. Rejected: an anchor, an alias, an explicit tag, a mapping key
-that is not a string, a duplicate mapping key, an empty document, and more than one document. A
-merge key is an alias or a tag in practice and is rejected. `yes` and `no` are strings under YAML
-1.2; a quoted scalar is always a string. A plain integer literal is read exactly into `i128`,
+that is not a string, a plain `<<` merge key, a duplicate mapping key, an empty document, and more
+than one document. A merge key is rejected whether its value is an alias, an inline mapping
+(`<<: { a: 1 }`), or any other node; a quoted key spelling `<<` is a literal string key. `yes` and
+`no` are strings under YAML 1.2; a quoted scalar is always a string, so `''` is an empty string. An
+empty plain scalar, as in `enabled:`, is null. A plain integer literal is read exactly into `i128`,
 including the `0x` and `0o` forms, and a value outside `i128` is unrepresentable rather than
 rounded.
 
@@ -246,8 +250,10 @@ path `http` then `port`, while `http.port` is one component named `http.port`. U
   `f32` only when the narrowing is exact. An integer is never read as a float and a float is never
   read as an integer, even when the number has no fraction, so `1` does not satisfy an `f64` read
   and `1.0` does not satisfy an `i64` read. A string is never parsed as a number.
-- A `Value::DateTime` reads only as [`DateTime`](../src/value.rs). It is never read as a `String`,
-  and a string is never read as a `DateTime`. Only the `toml` feature produces this value.
+- A `Value::DateTime` reads only as [`DateTime`](../src/value.rs). It is never read as a `String`
+  or a map, and a string or a map is never read as a `DateTime`. The date-time is its own serde
+  kind, not a one-field map, so a map that happens to contain a `text` key cannot satisfy a
+  `DateTime` read. Only the `toml` feature produces this value.
 - A deserialization error carries a fixed shape label. A caller-supplied serde message, a custom
   expectation, and a value are all discarded.
 - A type mismatch names the source that wrote the failing leaf when the snapshot records one,

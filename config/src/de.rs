@@ -206,9 +206,9 @@ impl<'de> Deserializer<'de> for Cursor<'de, '_> {
                 Value::Integer(number) => visit_integer(*number, visitor),
                 Value::Float(number) => visitor.visit_f64(*number),
                 Value::String(text) => visitor.visit_borrowed_str(text),
-                Value::DateTime(date_time) => {
-                    visitor.visit_map(DateTimeAccess::new(date_time.as_str()))
-                }
+                // A date-time is its own kind. It is not presented as a map and not as a string,
+                // so a generic read cannot silently turn it into another shape.
+                Value::DateTime(_) => Err(DeError::mismatch("a date-time")),
                 Value::Array(items) => visitor.visit_seq(SequenceAccess {
                     items: items.iter(),
                     index: 0,
@@ -247,10 +247,19 @@ impl<'de> Deserializer<'de> for Cursor<'de, '_> {
 
     fn deserialize_newtype_struct<V: Visitor<'de>>(
         self,
-        _name: &'static str,
+        name: &'static str,
         visitor: V,
     ) -> Result<V::Value, DeError> {
-        visitor.visit_newtype_struct(self)
+        let Self { node, path } = self;
+        if name == crate::value::DESERIALIZE_NAME {
+            return match node {
+                Node::Value(Value::DateTime(date_time)) => {
+                    visitor.visit_newtype_struct(Cursor::new(Node::Str(date_time.as_str()), path))
+                }
+                _ => Err(DeError::mismatch("a date-time")),
+            };
+        }
+        visitor.visit_newtype_struct(Cursor { node, path })
     }
 
     fn deserialize_bool<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
@@ -429,9 +438,6 @@ impl<'de> Deserializer<'de> for Cursor<'de, '_> {
                 pending: None,
                 path: self.path,
             }),
-            Node::Value(Value::DateTime(date_time)) => {
-                visitor.visit_map(DateTimeAccess::new(date_time.as_str()))
-            }
             _ => Err(DeError::mismatch("a map")),
         }
     }
@@ -544,43 +550,6 @@ impl<'de> SeqAccess<'de> for SequenceAccess<'de, '_> {
 
     fn size_hint(&self) -> Option<usize> {
         Some(self.items.len())
-    }
-}
-
-/// Presents a [`Value::DateTime`] as the one-field map its `Deserialize` implementation expects.
-struct DateTimeAccess<'de> {
-    text: &'de str,
-    read_key: bool,
-}
-
-impl<'de> DateTimeAccess<'de> {
-    const fn new(text: &'de str) -> Self {
-        Self {
-            text,
-            read_key: false,
-        }
-    }
-}
-
-impl<'de> MapAccess<'de> for DateTimeAccess<'de> {
-    type Error = DeError;
-
-    fn next_key_seed<K: DeserializeSeed<'de>>(
-        &mut self,
-        seed: K,
-    ) -> Result<Option<K::Value>, DeError> {
-        if self.read_key {
-            return Ok(None);
-        }
-        self.read_key = true;
-        let mut path = Vec::new();
-        seed.deserialize(Cursor::new(Node::Str("text"), &mut path))
-            .map(Some)
-    }
-
-    fn next_value_seed<V: DeserializeSeed<'de>>(&mut self, seed: V) -> Result<V::Value, DeError> {
-        let mut path = Vec::new();
-        seed.deserialize(Cursor::new(Node::Str(self.text), &mut path))
     }
 }
 

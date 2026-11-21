@@ -2,7 +2,10 @@
 
 use std::{collections::BTreeMap, fmt};
 
-use serde::de::{self, Deserializer, MapAccess, Visitor};
+use serde::{
+    Deserialize,
+    de::{self, Deserializer, Visitor},
+};
 
 /// A format-neutral configuration value.
 ///
@@ -38,7 +41,8 @@ pub enum Value {
     /// Only a TOML document produces this variant. It preserves the canonical RFC 3339 spelling
     /// the parser produced, so a local date such as `1979-05-27`, a local time such as
     /// `07:32:00`, and an offset date-time all keep their exact form. A typed read requires
-    /// [`DateTime`]; it is never read as a [`String`] and a string is never read as this.
+    /// [`DateTime`]; it is never read as a [`String`] and a string is never read as this, and it
+    /// is never read as a map and a map is never read as this.
     DateTime(DateTime),
     /// An ordered list. Lists replace during a merge; they never concatenate.
     Array(Vec<Self>),
@@ -142,7 +146,10 @@ impl Value {
 /// is dropped when a document is read into a [`Value`].
 ///
 /// A typed read uses this type, `get::<DateTime>("started")`. It is never read as a [`String`],
-/// and a string is never read as this type.
+/// a string is never read as this type, and it is never read as a map: the marker this type hands
+/// its deserializer names the date-time kind rather than the one-field map an earlier version
+/// used, so a map that happens to contain a `text` key cannot become a [`DateTime`] and a
+/// [`DateTime`] cannot become a generic map.
 ///
 /// ```
 /// use neotales_config::{Builder, DateTime, Value};
@@ -196,12 +203,19 @@ impl fmt::Debug for DateTime {
     }
 }
 
+/// The marker `DateTime`'s `Deserialize` hands its deserializer.
+///
+/// The value cursor treats this name as the date-time kind. It is not a map member and it is not
+/// a generic newtype, so neither a map nor a string can satisfy a [`DateTime`] read, and a
+/// [`DateTime`] cannot satisfy a generic map read.
+pub(crate) const DESERIALIZE_NAME: &str = "$neotales_config::DateTime";
+
 impl<'de> de::Deserialize<'de> for DateTime {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        /// Accepts exactly the one-field map the value cursor presents.
+        /// Reads the exact text the value cursor hands a date-time.
         struct DateTimeVisitor;
 
         impl<'de> Visitor<'de> for DateTimeVisitor {
@@ -211,26 +225,17 @@ impl<'de> de::Deserialize<'de> for DateTime {
                 formatter.write_str("a date-time")
             }
 
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            fn visit_newtype_struct<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
             where
-                A: MapAccess<'de>,
+                D: Deserializer<'de>,
             {
-                let mut text = None;
-                while let Some(key) = map.next_key::<String>()? {
-                    if key != "text" {
-                        return Err(de::Error::unknown_field(&key, &["text"]));
-                    }
-                    if text.is_some() {
-                        return Err(de::Error::duplicate_field("text"));
-                    }
-                    text = Some(map.next_value::<String>()?);
-                }
-                let text = text.ok_or_else(|| de::Error::missing_field("text"))?;
-                Ok(DateTime::new(text))
+                // The cursor hands the preserved RFC 3339 text, which is the only content a
+                // `DateTime` holds.
+                Ok(DateTime::new(String::deserialize(deserializer)?))
             }
         }
 
-        deserializer.deserialize_map(DateTimeVisitor)
+        deserializer.deserialize_newtype_struct(DESERIALIZE_NAME, DateTimeVisitor)
     }
 }
 

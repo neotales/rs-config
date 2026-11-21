@@ -133,6 +133,103 @@ fn toml_reads_the_fixture_and_keeps_a_date_time_typed() {
     );
 }
 
+#[cfg(feature = "json5")]
+#[test]
+fn json5_reads_unicode_whitespace_and_keeps_numbers_exact() {
+    use neotales_config::{Builder, Json5File};
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("spaced.json5");
+    std::fs::write(
+        &path,
+        "{ port:\u{00A0}8080, big:\u{2028}18446744073709551617, hex:\u{2029}0x1F90, \
+         Infinity\u{00A0}: 1 }",
+    )
+    .unwrap();
+
+    let config = Builder::new()
+        .json5_file("json5", Json5File::new(&path))
+        .build()
+        .expect("JSON5 accepts its Unicode whitespace");
+    assert_eq!(config.get::<u16>("port").unwrap(), 8080);
+    assert_eq!(
+        config.get::<i128>("big").unwrap(),
+        18_446_744_073_709_551_617
+    );
+    assert_eq!(config.get::<i128>("hex").unwrap(), 8080);
+    assert_eq!(config.get::<u8>("Infinity").unwrap(), 1);
+}
+
+#[cfg(feature = "yaml")]
+#[test]
+fn yaml_empty_scalars_and_plain_merge_keys() {
+    use neotales_config::{Builder, SourceErrorKind, Value, YamlFile};
+
+    let directory = tempfile::tempdir().unwrap();
+
+    let empty = directory.path().join("empty.yaml");
+    std::fs::write(&empty, "enabled:\ntext: ''\ndouble: \"\"\n").unwrap();
+    let config = Builder::new()
+        .yaml_file("yaml", YamlFile::new(&empty))
+        .build()
+        .expect("an empty plain scalar is valid YAML");
+    assert_eq!(
+        config.value().unwrap().as_map().unwrap()["enabled"],
+        Value::Null
+    );
+    assert_eq!(config.get::<Option<String>>("enabled").unwrap(), None);
+    assert_eq!(config.get::<String>("text").unwrap(), "");
+    assert_eq!(config.get::<String>("double").unwrap(), "");
+
+    let merge = directory.path().join("merge.yaml");
+    std::fs::write(&merge, "base: { a: 1 }\nchild:\n  <<: { b: 2 }\n").unwrap();
+    let error = Builder::new()
+        .yaml_file("yaml", YamlFile::new(&merge))
+        .build()
+        .expect_err("a plain merge key is rejected");
+    assert!(error.is_source_failure(), "{error}");
+    assert_eq!(
+        error.source_kind(),
+        Some(SourceErrorKind::Invalid),
+        "{error}"
+    );
+
+    let quoted = directory.path().join("quoted.yaml");
+    std::fs::write(&quoted, "child:\n  '<<': inherited\n").unwrap();
+    let config = Builder::new()
+        .yaml_file("yaml", YamlFile::new(&quoted))
+        .build()
+        .expect("a quoted merge spelling is a literal key");
+    assert_eq!(config.get::<String>("child.<<").unwrap(), "inherited");
+}
+
+#[cfg(feature = "toml")]
+#[test]
+fn toml_date_time_is_not_a_map_and_a_map_is_not_a_date_time() {
+    use std::collections::BTreeMap;
+
+    use neotales_config::{Builder, DateTime, TomlFile};
+
+    let config = Builder::new()
+        .toml_file("gateway", TomlFile::new(fixture("defaults.toml")))
+        .build()
+        .expect("the TOML fixture parses");
+
+    let error = config
+        .get::<BTreeMap<String, String>>("service.started")
+        .expect_err("a date-time is not a map");
+    assert!(error.is_type_mismatch(), "{error}");
+    assert!(
+        !format!("{error}{error:?}").contains("1979-05-27"),
+        "{error}"
+    );
+
+    let error = config
+        .get::<DateTime>("service")
+        .expect_err("a map is not a date-time");
+    assert!(error.is_type_mismatch(), "{error}");
+}
+
 #[cfg(feature = "yaml")]
 #[test]
 fn yaml_reads_the_fixture() {

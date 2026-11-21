@@ -281,16 +281,18 @@ the same source sees a replaced file. There is no watcher and no reload holder i
 A value the model cannot hold rejects the source with an unrepresentable-value error; it is never
 rounded. For JSON, JSON5, JSONC, and YAML that includes an integer outside `i128` and a float that
 is not finite. For TOML it includes `nan`, `inf`, and `-inf`. TOML dates and times stay typed as
-`DateTime`; JSON, JSON5, JSONC, YAML, and INI have no date-time kind.
+`DateTime`; JSON, JSON5, JSONC, YAML, and INI have no date-time kind. A `DateTime` reads only as
+`DateTime`: it is not a string and not a map, and neither a string nor a map is read as one.
 
 JSONC is not JSON5. It accepts standard JSON plus `//` line comments and `/* */` block comments; a
 trailing comma, a single-quoted string, an unquoted name, a hexadecimal number, `Infinity`, and
 `NaN` reject it. JSON5 accepts all of those extensions.
 
 YAML accepts the YAML 1.2 core schema and rejects anchors, aliases, explicit tags, non-string keys,
-duplicate keys, an empty document, and more than one document. A merge key is an alias or a tag in
-practice, so it is rejected too. `yes` and `no` are strings under YAML 1.2; use `true` and `false`
-for booleans.
+a plain `<<` merge key, duplicate keys, an empty document, and more than one document. A merge key
+is rejected even when its value is an inline mapping; a quoted key spelling `<<` is a literal
+string key. An empty plain scalar such as `enabled:` is null, while `''` is an empty string. `yes`
+and `no` are strings under YAML 1.2; use `true` and `false` for booleans.
 
 INI uses the plain dialect this crate defines. A `[section]` header is one literal key, so
 `[a.b]` is the key `a.b`, not a nested map. An assignment before the first section is a root key.

@@ -20,14 +20,18 @@ use super::{Source, file::read_text};
 ///
 /// The dialect is YAML 1.2 core schema in UTF-8. The parser is driven event by event, which is
 /// what makes every rejection explicit rather than silent. Rejected: an anchor, an alias, an
-/// explicit tag, a mapping key that is not a string, a duplicate mapping key, an empty document,
-/// and more than one document in the file. A merge key is a tag or an alias in practice and is
-/// rejected for the same reason.
+/// explicit tag, a mapping key that is not a string, a plain `<<` merge key, a duplicate mapping
+/// key, an empty document, and more than one document in the file.
 ///
 /// A plain scalar follows the YAML 1.2 core schema: `true`/`false`, `null`/`~`, decimal,
-/// hexadecimal (`0x`), and octal (`0o`) integers, and finite floats. A quoted scalar is always a
-/// string, so `"8080"` stays a string. A plain scalar that is not an integer literal is resolved
-/// by the parser; `yes` and `no` are strings under YAML 1.2.
+/// hexadecimal (`0x`), and octal (`0o`) integers, and finite floats. An empty plain scalar, as in
+/// `enabled:`, is null. A quoted scalar is always a string, so `"8080"` stays a string and `''`
+/// stays an empty string. A plain scalar that is not an integer literal is resolved by the
+/// parser; `yes` and `no` are strings under YAML 1.2.
+///
+/// A merge key is rejected whether its value is an alias, an inline mapping (`<<: { a: 1 }`), or
+/// any other node. A quoted key spelling `<<` is a literal string key, not a merge key, and stays
+/// accepted.
 ///
 /// The file is read again on every [`Source::load`]; there is no watcher and no cached document.
 /// The document root must be a mapping. A sequence root, a scalar root, and an empty document
@@ -37,7 +41,7 @@ use super::{Source, file::read_text};
 ///
 /// Returns [`SourceError::unavailable`] when the file cannot be read,
 /// [`SourceError::invalid`] when it is not UTF-8, is not valid YAML, has an anchor, alias, tag,
-/// non-string key, duplicate key, or a root that is not a mapping, and
+/// non-string key, plain `<<` merge key, duplicate key, or a root that is not a mapping, and
 /// [`SourceError::unrepresentable`] when a number does not fit the value model. The error carries
 /// the kind only; it never carries a path, a line, a key, or a value.
 ///
@@ -169,6 +173,14 @@ struct Receiver {
 }
 
 impl Receiver {
+    /// Whether the next scalar would become a mapping key.
+    fn awaiting_key(&self) -> bool {
+        matches!(
+            self.stack.last(),
+            Some(Container::Mapping { key: None, .. })
+        )
+    }
+
     /// Attaches one finished node to the open collection, or records it as the document root.
     fn attach(&mut self, value: Value) {
         match self.stack.last_mut() {
@@ -204,6 +216,19 @@ impl Receiver {
 
     fn scalar(&mut self, text: &str, style: ScalarStyle) {
         if style == ScalarStyle::Plain {
+            if text.is_empty() {
+                // An empty plain scalar is null in the YAML 1.2 core schema. The parser normally
+                // substitutes `~` for it; making the case explicit keeps the behavior independent
+                // of that substitution and of the scalar resolver.
+                self.attach(Value::Null);
+                return;
+            }
+            if text == "<<" && self.awaiting_key() {
+                // A plain `<<` key is a merge key. Merge semantics are out of scope, and keeping
+                // it as a literal key would silently change the document's meaning.
+                self.failed = true;
+                return;
+            }
             match integer_literal(text) {
                 Some(Ok(integer)) => {
                     self.attach(Value::Integer(integer));
@@ -319,6 +344,43 @@ mod tests {
     fn yaml_12_treats_yes_and_no_as_strings() {
         let document = map("yes: maybe\nmaybe: yes\n");
         assert_eq!(document["maybe"], Value::from("yes"));
+    }
+
+    #[test]
+    fn an_empty_plain_scalar_is_null_and_a_quoted_empty_scalar_is_a_string() {
+        let document = map("enabled:\ncommented: # note\ntext: ''\ndouble: \"\"\n");
+        assert_eq!(document["enabled"], Value::Null);
+        assert_eq!(document["commented"], Value::Null);
+        assert_eq!(document["text"], Value::from(""));
+        assert_eq!(document["double"], Value::from(""));
+
+        let document = map("outer:\n  enabled:\n  next: 1\n");
+        let outer = document["outer"].as_map().unwrap();
+        assert_eq!(outer["enabled"], Value::Null);
+        assert_eq!(outer["next"], Value::Integer(1));
+    }
+
+    #[test]
+    fn a_plain_merge_key_is_rejected_with_any_value() {
+        for document in [
+            "base: { a: 1 }\nchild:\n  <<: { b: 2 }\n",
+            "child:\n  <<: inherited\n",
+            "child:\n  ? <<\n  : inherited\n",
+        ] {
+            let error = parse(document).unwrap_err();
+            assert_eq!(error.kind(), SourceErrorKind::Invalid, "{document}");
+        }
+    }
+
+    #[test]
+    fn a_quoted_merge_spelling_is_a_literal_key() {
+        let document = map("child:\n  '<<': inherited\n");
+        let child = document["child"].as_map().unwrap();
+        assert_eq!(child["<<"], Value::from("inherited"));
+
+        // A plain `<<` in value position is a string, not a merge key.
+        let document = map("note: <<\n");
+        assert_eq!(document["note"], Value::from("<<"));
     }
 
     #[test]

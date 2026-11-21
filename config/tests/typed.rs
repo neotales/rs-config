@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use neotales_config::{Builder, Config, Value};
+use neotales_config::{Builder, Config, DateTime, Value};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -73,6 +73,74 @@ fn fixture() -> Config {
         )
         .build()
         .expect("the fixture builds")
+}
+
+#[test]
+fn a_date_time_is_its_own_kind_in_both_directions() {
+    let started = "1979-05-27T07:32:00";
+    let config = Builder::new()
+        .memory(
+            "dates",
+            Value::map([
+                ("started", Value::from(DateTime::new(started))),
+                ("as_map", Value::map([("text", Value::from(started))])),
+                ("as_string", Value::from(started)),
+                (
+                    "dates",
+                    Value::map([
+                        ("one", Value::from(DateTime::new("1979-05-27"))),
+                        ("two", Value::from(DateTime::new("07:32:00"))),
+                    ]),
+                ),
+            ]),
+        )
+        .build()
+        .expect("the fixture builds");
+
+    assert_eq!(config.get::<DateTime>("started").unwrap().as_str(), started);
+    assert_eq!(
+        config
+            .child("started")
+            .unwrap()
+            .load::<DateTime>()
+            .unwrap()
+            .as_str(),
+        started
+    );
+    assert_eq!(
+        config
+            .get::<std::collections::BTreeMap<String, DateTime>>("dates")
+            .unwrap()["one"]
+            .as_str(),
+        "1979-05-27"
+    );
+
+    // A date-time is never read as a string or a map.
+    for error in [
+        config.get::<String>("started").unwrap_err(),
+        config
+            .get::<BTreeMap<String, String>>("started")
+            .unwrap_err(),
+        config
+            .get::<Option<BTreeMap<String, String>>>("started")
+            .unwrap_err(),
+    ] {
+        assert!(error.is_type_mismatch(), "{error}");
+    }
+
+    // Neither a map nor a string is read as a date-time, even when the map has the one field an
+    // earlier representation used.
+    for path in ["as_map", "as_string"] {
+        let error = config.get::<DateTime>(path).unwrap_err();
+        assert!(error.is_type_mismatch(), "{error}");
+        assert_eq!(error.expected(), Some("a date-time"), "{error}");
+        for text in [format!("{error}"), format!("{error:?}")] {
+            assert!(
+                !text.contains(started),
+                "the date-time text reached the error: {text}"
+            );
+        }
+    }
 }
 
 #[test]

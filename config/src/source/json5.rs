@@ -20,8 +20,9 @@ use super::{Source, file::read_text};
 /// A JSON5 document read as one configuration source.
 ///
 /// The dialect is JSON5 1.0 in UTF-8: comments, trailing commas, single-quoted strings, unquoted
-/// member names, hexadecimal numbers, a unary plus, a bare decimal point, `Infinity`, `NaN`, and
-/// multi-line strings are accepted. A byte-order mark is not part of the dialect.
+/// member names, hexadecimal numbers, a unary plus, a bare decimal point, `Infinity`, `NaN`,
+/// multi-line strings, and the dialect's Unicode whitespace are accepted. That whitespace set is
+/// wider than ASCII and includes U+00A0, U+2028, U+2029, and U+FEFF.
 ///
 /// The file is read again on every [`Source::load`]; there is no watcher and no cached document.
 /// The document root must be an object. A later member with the same name replaces the earlier
@@ -185,11 +186,47 @@ impl Tokens {
 }
 
 fn is_ident_start(byte: u8) -> bool {
-    byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$') || byte >= 0x80
+    byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$')
 }
 
 fn is_ident_continue(byte: u8) -> bool {
     is_ident_start(byte) || byte.is_ascii_digit()
+}
+
+/// The whitespace set of JSON5 1.0.
+///
+/// It is wider than ASCII: U+00A0, U+2028, U+2029, and U+FEFF (the zero-width no-break space) are
+/// all whitespace to the parser. The scanner mirrors the parser's set, or a number next to one of
+/// them would be swallowed by the identifier scan and the token count would disagree.
+const fn is_json5_whitespace(character: char) -> bool {
+    matches!(
+        character,
+        '\u{0009}'..='\u{000D}' | '\u{0020}' | '\u{00A0}' | '\u{2028}' | '\u{2029}' | '\u{FEFF}'
+    )
+}
+
+/// Advances past one identifier, including Unicode identifier characters.
+///
+/// JSON5 whitespace ends an identifier, so `Infinity\u{00A0}:` is the member name `Infinity`
+/// followed by whitespace and a colon, not one long identifier.
+fn skip_ident(text: &str, mut index: usize) -> usize {
+    let bytes = text.as_bytes();
+    while index < bytes.len() {
+        if is_ident_continue(bytes[index]) {
+            index += 1;
+        } else if bytes[index] >= 0x80 {
+            let Some(character) = text[index..].chars().next() else {
+                break;
+            };
+            if is_json5_whitespace(character) {
+                break;
+            }
+            index += character.len_utf8();
+        } else {
+            break;
+        }
+    }
+    index
 }
 
 /// Scans the document for number tokens, outside strings and comments, in document order.
@@ -202,6 +239,20 @@ fn number_tokens(text: &str) -> Vec<NumberToken> {
     let mut tokens = Vec::new();
     let mut index = 0;
     while index < bytes.len() {
+        // A non-ASCII character is either JSON5 whitespace or part of an identifier. Handling it
+        // before the byte match keeps a UTF-8 continuation byte from being read as an identifier
+        // start that then swallows the number after it.
+        if bytes[index] >= 0x80 {
+            let Some(character) = text[index..].chars().next() else {
+                break;
+            };
+            if is_json5_whitespace(character) {
+                index += character.len_utf8();
+            } else {
+                index = skip_ident(text, index);
+            }
+            continue;
+        }
         match bytes[index] {
             b'"' | b'\'' => index = skip_string(bytes, index),
             b'/' if bytes.get(index + 1) == Some(&b'/') => {
@@ -220,13 +271,9 @@ fn number_tokens(text: &str) -> Vec<NumberToken> {
             }
             byte if is_ident_start(byte) => {
                 let start = index;
-                index += 1;
-                while index < bytes.len() && is_ident_continue(bytes[index]) {
-                    index += 1;
-                }
+                index = skip_ident(text, index);
                 let word = &text[start..index];
-                if matches!(word, "Infinity" | "NaN")
-                    && next_significant(bytes, index) != Some(b':')
+                if matches!(word, "Infinity" | "NaN") && next_significant(text, index) != Some(b':')
                 {
                     tokens.push(NumberToken::Float(if word == "NaN" {
                         f64::NAN
@@ -258,11 +305,17 @@ fn skip_string(bytes: &[u8], start: usize) -> usize {
     index
 }
 
-/// The next byte after whitespace and comments, without moving the caller's cursor.
-fn next_significant(bytes: &[u8], mut index: usize) -> Option<u8> {
+/// The next byte after JSON5 whitespace and comments, without moving the caller's cursor.
+fn next_significant(text: &str, mut index: usize) -> Option<u8> {
+    let bytes = text.as_bytes();
     loop {
-        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
-            index += 1;
+        while index < bytes.len() {
+            let character = text[index..].chars().next()?;
+            if is_json5_whitespace(character) {
+                index += character.len_utf8();
+            } else {
+                break;
+            }
         }
         match (bytes.get(index), bytes.get(index + 1)) {
             (Some(b'/'), Some(b'/')) => {
@@ -574,6 +627,31 @@ b",
         let document = map("{ Infinity: 1, NaN: 2 }");
         assert_eq!(document["Infinity"], Value::Integer(1));
         assert_eq!(document["NaN"], Value::Integer(2));
+    }
+
+    #[test]
+    fn accepts_json5_unicode_whitespace_around_numbers() {
+        let document = map("{ port:\u{00A0}8080, big:\u{2028}18446744073709551617, \
+             hex:\u{2029}0x1F90, plus:\u{00A0}+42, negative:\u{2029}-42 }");
+        assert_eq!(document["port"], Value::Integer(8080));
+        assert_eq!(document["big"], Value::Integer(18_446_744_073_709_551_617));
+        assert_eq!(document["hex"], Value::Integer(8080));
+        assert_eq!(document["plus"], Value::Integer(42));
+        assert_eq!(document["negative"], Value::Integer(-42));
+    }
+
+    #[test]
+    fn a_unicode_whitespace_before_a_member_colon_does_not_make_it_a_number() {
+        let document = map("{ Infinity\u{00A0}: 1, NaN\u{2028}: 2 }");
+        assert_eq!(document["Infinity"], Value::Integer(1));
+        assert_eq!(document["NaN"], Value::Integer(2));
+    }
+
+    #[test]
+    fn a_number_after_unicode_whitespace_keeps_its_kind() {
+        let document = map("{ whole:\u{00A0}8080, fraction:\u{00A0}8080.5 }");
+        assert_eq!(document["whole"], Value::Integer(8080));
+        assert_eq!(document["fraction"], Value::Float(8080.5));
     }
 
     #[test]
