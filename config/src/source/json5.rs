@@ -11,6 +11,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+// The scanner's whitespace and line-terminator tests are the parser's own predicates rather than
+// a hand-written copy: a copy of the set dropped the Unicode space separators and the Unicode line
+// terminators, and the token scan then disagreed with a parse of the same document.
+use json5::char::{is_json5_line_terminator, is_json5_whitespace};
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 
 use crate::{SourceError, Value};
@@ -22,7 +26,7 @@ use super::{Source, file::read_text};
 /// The dialect is JSON5 1.0 in UTF-8: comments, trailing commas, single-quoted strings, unquoted
 /// member names, hexadecimal numbers, a unary plus, a bare decimal point, `Infinity`, `NaN`,
 /// multi-line strings, and the dialect's Unicode whitespace are accepted. That whitespace set is
-/// wider than ASCII and includes U+00A0, U+2028, U+2029, and U+FEFF.
+/// every Unicode space separator (`Zs`) plus U+0009..=U+000D, U+2028, U+2029, and U+FEFF.
 ///
 /// The file is read again on every [`Source::load`]; there is no watcher and no cached document.
 /// The document root must be an object. A later member with the same name replaces the earlier
@@ -193,18 +197,6 @@ fn is_ident_continue(byte: u8) -> bool {
     is_ident_start(byte) || byte.is_ascii_digit()
 }
 
-/// The whitespace set of JSON5 1.0.
-///
-/// It is wider than ASCII: U+00A0, U+2028, U+2029, and U+FEFF (the zero-width no-break space) are
-/// all whitespace to the parser. The scanner mirrors the parser's set, or a number next to one of
-/// them would be swallowed by the identifier scan and the token count would disagree.
-const fn is_json5_whitespace(character: char) -> bool {
-    matches!(
-        character,
-        '\u{0009}'..='\u{000D}' | '\u{0020}' | '\u{00A0}' | '\u{2028}' | '\u{2029}' | '\u{FEFF}'
-    )
-}
-
 /// Advances past one identifier, including Unicode identifier characters.
 ///
 /// JSON5 whitespace ends an identifier, so `Infinity\u{00A0}:` is the member name `Infinity`
@@ -225,6 +217,25 @@ fn skip_ident(text: &str, mut index: usize) -> usize {
         } else {
             break;
         }
+    }
+    index
+}
+
+/// Advances past the body of a `//` line comment, stopping before its line terminator.
+///
+/// A JSON5 line comment ends at the first line terminator, and that is not only CR and LF:
+/// U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR end it too. The terminator test is the
+/// parser's own, so a comment the parser ends here ends here as well. The terminator itself is
+/// left for the caller as whitespace.
+fn skip_line_comment(text: &str, mut index: usize) -> usize {
+    while index < text.len() {
+        let Some(character) = text[index..].chars().next() else {
+            break;
+        };
+        if is_json5_line_terminator(character) {
+            break;
+        }
+        index += character.len_utf8();
     }
     index
 }
@@ -256,10 +267,7 @@ fn number_tokens(text: &str) -> Vec<NumberToken> {
         match bytes[index] {
             b'"' | b'\'' => index = skip_string(bytes, index),
             b'/' if bytes.get(index + 1) == Some(&b'/') => {
-                index += 2;
-                while index < bytes.len() && !matches!(bytes[index], b'\n' | b'\r') {
-                    index += 1;
-                }
+                index = skip_line_comment(text, index + 2);
             }
             b'/' if bytes.get(index + 1) == Some(&b'*') => {
                 index += 2;
@@ -318,12 +326,7 @@ fn next_significant(text: &str, mut index: usize) -> Option<u8> {
             }
         }
         match (bytes.get(index), bytes.get(index + 1)) {
-            (Some(b'/'), Some(b'/')) => {
-                index += 2;
-                while index < bytes.len() && !matches!(bytes[index], b'\n' | b'\r') {
-                    index += 1;
-                }
-            }
+            (Some(b'/'), Some(b'/')) => index = skip_line_comment(text, index + 2),
             (Some(b'/'), Some(b'*')) => {
                 index += 2;
                 while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
@@ -534,6 +537,8 @@ impl<'de> Visitor<'de> for Json5Visitor<'_> {
 
 #[cfg(test)]
 mod tests {
+    use json5::char::is_json5_whitespace;
+
     use super::parse;
     use crate::{SourceErrorKind, Value};
 
@@ -543,6 +548,160 @@ mod tests {
             .as_map()
             .expect("the document is an object")
             .clone()
+    }
+
+    /// The complete JSON5 white space grammar, category by category.
+    ///
+    /// It is ASCII tab through carriage return, space, every Unicode space separator (`Zs`), both
+    /// Unicode line terminators, and the byte-order mark. U+2003 is included on purpose: a
+    /// hand-written set that mirrored only the ASCII-adjacent characters dropped the `Zs` block.
+    const JSON5_WHITESPACE: [char; 25] = [
+        '\u{0009}', '\u{000A}', '\u{000B}', '\u{000C}', '\u{000D}', '\u{0020}', '\u{00A0}',
+        '\u{1680}', '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}', '\u{2004}', '\u{2005}',
+        '\u{2006}', '\u{2007}', '\u{2008}', '\u{2009}', '\u{200A}', '\u{2028}', '\u{2029}',
+        '\u{202F}', '\u{205F}', '\u{3000}', '\u{FEFF}',
+    ];
+
+    #[test]
+    fn the_whitespace_list_covers_the_parsers_whole_grammar() {
+        for value in 0..=0x0010_FFFF_u32 {
+            let Some(character) = char::from_u32(value) else {
+                continue;
+            };
+            if is_json5_whitespace(character) {
+                assert!(
+                    JSON5_WHITESPACE.contains(&character),
+                    "the grammar list omits U+{value:04X}, which the parser accepts"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn accepts_every_json5_whitespace_character_around_a_number() {
+        for whitespace in JSON5_WHITESPACE {
+            assert!(
+                is_json5_whitespace(whitespace),
+                "U+{:04X} is not JSON5 whitespace",
+                u32::from(whitespace)
+            );
+            let document = map(&format!(
+                "{{ port:{whitespace}8080, big:{whitespace}18446744073709551617, \
+                 hex:{whitespace}0x1F90, plus:{whitespace}+42, fraction:{whitespace}.5, \
+                 negative:{whitespace}-42 }}"
+            ));
+            assert_eq!(
+                document["port"],
+                Value::Integer(8080),
+                "U+{:04X} before an integer",
+                u32::from(whitespace)
+            );
+            assert_eq!(
+                document["big"],
+                Value::Integer(18_446_744_073_709_551_617),
+                "U+{:04X} before a large integer",
+                u32::from(whitespace)
+            );
+            assert_eq!(document["hex"], Value::Integer(8080));
+            assert_eq!(document["plus"], Value::Integer(42));
+            assert_eq!(document["fraction"], Value::Float(0.5));
+            assert_eq!(document["negative"], Value::Integer(-42));
+        }
+    }
+
+    #[test]
+    fn infinity_and_nan_member_names_take_every_json5_whitespace_before_the_colon() {
+        for whitespace in JSON5_WHITESPACE {
+            let document = map(&format!(
+                "{{ Infinity{whitespace}: 1, NaN{whitespace}: 2 }}"
+            ));
+            assert_eq!(
+                document["Infinity"],
+                Value::Integer(1),
+                "U+{:04X} before a colon",
+                u32::from(whitespace)
+            );
+            assert_eq!(
+                document["NaN"],
+                Value::Integer(2),
+                "U+{:04X} before a colon",
+                u32::from(whitespace)
+            );
+        }
+    }
+
+    #[test]
+    fn a_line_comment_ends_at_either_unicode_line_terminator() {
+        for terminator in ['\u{2028}', '\u{2029}'] {
+            let document = map(&format!(
+                "{{ first: 1, // note{terminator}second: 8080, // note{terminator}third: -42, \
+                 fourth: 0x1F90 }}"
+            ));
+            assert_eq!(
+                document["second"],
+                Value::Integer(8080),
+                "U+{:04X} ends the first comment",
+                u32::from(terminator)
+            );
+            assert_eq!(
+                document["third"],
+                Value::Integer(-42),
+                "U+{:04X} ends the second comment",
+                u32::from(terminator)
+            );
+            assert_eq!(document["fourth"], Value::Integer(8080));
+        }
+    }
+
+    #[test]
+    fn a_number_after_a_unicode_line_comment_is_scanned() {
+        for terminator in ['\u{2028}', '\u{2029}'] {
+            let document = map(&format!(
+                "{{ after: // note{terminator}8080.5, whole: // note{terminator}18446744073709551617 }}"
+            ));
+            assert_eq!(
+                document["after"],
+                Value::Float(8080.5),
+                "U+{:04X} ends the comment",
+                u32::from(terminator)
+            );
+            assert_eq!(
+                document["whole"],
+                Value::Integer(18_446_744_073_709_551_617)
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_finite_value_after_a_unicode_line_comment_is_unrepresentable() {
+        for terminator in ['\u{2028}', '\u{2029}'] {
+            for literal in ["Infinity", "-Infinity", "NaN"] {
+                let error =
+                    parse(&format!("{{ value: // note{terminator}{literal} }}")).unwrap_err();
+                assert_eq!(
+                    error.kind(),
+                    SourceErrorKind::Unrepresentable,
+                    "U+{:04X} ends the comment before {literal}",
+                    u32::from(terminator)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn infinity_and_nan_member_names_after_a_unicode_line_comment_are_not_numbers() {
+        for terminator in ['\u{2028}', '\u{2029}'] {
+            let document = map(&format!(
+                "{{ Infinity // note{terminator}: 1, NaN // note{terminator}: 2 }}"
+            ));
+            assert_eq!(
+                document["Infinity"],
+                Value::Integer(1),
+                "U+{:04X} ends the comment after a member name",
+                u32::from(terminator)
+            );
+            assert_eq!(document["NaN"], Value::Integer(2));
+        }
     }
 
     #[test]

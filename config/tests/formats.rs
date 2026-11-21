@@ -160,6 +160,32 @@ fn json5_reads_unicode_whitespace_and_keeps_numbers_exact() {
     assert_eq!(config.get::<u8>("Infinity").unwrap(), 1);
 }
 
+#[cfg(feature = "json5")]
+#[test]
+fn json5_reads_a_space_separator_and_a_unicode_line_comment() {
+    use neotales_config::{Builder, Json5File};
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("unicode.json5");
+    // U+2003 EM SPACE is a space separator, outside the ASCII-adjacent characters a hand-written
+    // set tends to list; U+2028 ends a line comment like a newline does.
+    std::fs::write(
+        &path,
+        "{ spaced:\u{2003}8080, // note\u{2028}Infinity\u{3000}: 1, NaN\u{2028}: 2, \
+         ratio: // note\u{2029}8080.5 }",
+    )
+    .unwrap();
+
+    let config = Builder::new()
+        .json5_file("json5", Json5File::new(&path))
+        .build()
+        .expect("JSON5 accepts a space separator and a Unicode line comment");
+    assert_eq!(config.get::<u16>("spaced").unwrap(), 8080);
+    assert_eq!(config.get::<u8>("Infinity").unwrap(), 1);
+    assert_eq!(config.get::<u8>("NaN").unwrap(), 2);
+    assert!((config.get::<f64>("ratio").unwrap() - 8080.5).abs() < f64::EPSILON);
+}
+
 #[cfg(feature = "yaml")]
 #[test]
 fn yaml_empty_scalars_and_plain_merge_keys() {
