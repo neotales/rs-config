@@ -45,16 +45,19 @@ send. `gate` writes one machine-readable record: the commit it ran on, whether
 that checkout was clean, and for every member the artifact filename, the
 manifest digest, and the SHA-256 of the verified `.crate` bytes. It also prints
 the SHA-256 of the record itself, and can write that digest to a separate path
-for an out-of-band handoff. `preflight` requires that digest and checks the
-record bytes against it before parsing. It then reads the recorded commit, the
-manifests and the artifacts, rejects a stale commit, a changed manifest, a
-missing artifact, or an artifact whose bytes differ from the record, and only
-then asks crates.io about the recorded digests and prints the manual plan. It
-never re-hashes an artifact and presents the new hash as the reference: a
-mismatch is a failure, not a new capture. The digest anchor binds the record to
-the gate run only when the expected value comes from outside the workspace that
-holds the record and artifacts; it is not tamper-proofing. `preflight` does not
-run `cargo package`; the artifacts it reports on are the ones the gate built.
+for an out-of-band handoff. `preflight` requires that digest, and reads the
+record once: the digest is checked over those bytes and those same bytes are
+then parsed, so a record swapped between a would-be hash read and a would-be
+parse read is neither checked-unparsed nor parsed-unchecked. It then reads the
+recorded commit, the manifests and the artifacts, rejects a stale commit, a
+changed manifest, a missing artifact, or an artifact whose bytes differ from the
+record, and only then asks crates.io about the recorded digests and prints the
+manual plan. It never re-hashes an artifact and presents the new hash as the
+reference: a mismatch is a failure, not a new capture. The digest anchor binds
+the record to the gate run only when the expected value comes from outside the
+workspace that holds the record and artifacts; it is not tamper-proofing.
+`preflight` does not run `cargo package`; the artifacts it reports on are the
+ones the gate built.
 
 The comparison remains an after-the-fact one. It does not prove that the bytes
 `cargo publish` sends are the bytes the gate verified, and nothing here claims
@@ -75,9 +78,11 @@ Usage
         failures this gate exists to catch, checks the verdicts of `state`,
         proves both packages are byte-stable, mutates an artifact and the record
         together and requires preflight to refuse them against the captured
-        digest, proves there is no publishing path, and runs the gate from
-        outside the repository root. Nothing is published and no registry token
-        is read.
+        digest, swaps a different record in between the digest read and the
+        parse and requires both `consume_record` and `recheck_record` to parse
+        the bytes they checked, proves there is no publishing path, and runs the
+        gate from outside the repository root. Nothing is published and no
+        registry token is read.
 
     stage_gate.py state --manifest PATH --artifact-dir DIR [--index-base URL]
 
@@ -120,6 +125,7 @@ import time
 import tomllib
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -659,11 +665,22 @@ def write_record_digest(path: Path, digest: str) -> None:
     path.write_text(digest + "\n", encoding="utf-8", newline="\n")
 
 
-def record_digest(path: Path) -> str:
-    """Hash the record file without parsing it.
+# Injection point for `--self-test`, and None in every real run. It is called
+# after the record bytes have been read and verified and before those same bytes
+# are parsed. `read_checked_record` hands the parser the buffer the digest
+# covered, so a hook that replaces the file here proves the parser never reads
+# the path again: whatever it parses has already been checked.
+_record_swap_hook: Callable[[Path], None] | None = None
 
-    `preflight` uses this before `read_record`, so a changed or malformed record
-    is rejected against the captured digest rather than being interpreted.
+
+def read_record_bytes(path: Path) -> bytes:
+    """Read the record's bytes, exactly once, for both hashing and parsing.
+
+    A digest computed from one read and a JSON parser fed from another would let
+    the file be swapped in between: the digest would describe bytes that were
+    never parsed, and the parsed bytes would never have reached the digest
+    comparison. The caller passes this buffer to both, so the bytes that are
+    checked are the bytes that are parsed.
     """
     if path.is_symlink():
         raise GateError(f"{path} is a symbolic link; a gate record must be a real file")
@@ -674,28 +691,28 @@ def record_digest(path: Path) -> str:
             "artifacts and call that a capture."
         )
     try:
-        return sha256(path)
+        return path.read_bytes()
     except OSError as error:
-        raise GateError(f"{path} cannot be hashed: {error}") from error
+        raise GateError(f"{path} is not a readable gate record: {error}") from error
 
 
 def read_record(path: Path) -> ReleaseRecord:
-    """Read and strictly validate the gate record.
+    """Read and strictly validate the gate record."""
+    return parse_record(path, read_record_bytes(path))
+
+
+def parse_record(path: Path, data: bytes) -> ReleaseRecord:
+    """Parse and strictly validate record bytes the caller has already read.
+
+    The bytes are an argument, not a path, so the parser cannot re-read a file
+    that changed after its digest was checked.
 
     An unknown key is a failure, not something to ignore: `preflight` must not
     act on a record whose meaning it does not fully understand.
     """
-    if path.is_symlink():
-        raise GateError(f"{path} is a symbolic link; a gate record must be a real file")
-    if not path.is_file():
-        raise GateError(
-            f"{path} is missing. preflight consumes the gate record; run "
-            "`stage_gate.py gate --record PATH` first. It will not re-hash the "
-            "artifacts and call that a capture."
-        )
     try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValueError) as error:
+        document = json.loads(data.decode("utf-8"))
+    except (UnicodeError, ValueError) as error:
         raise GateError(f"{path} is not a readable gate record: {error}") from error
     if not isinstance(document, dict):
         raise GateError(f"{path} is not a JSON object")
@@ -864,13 +881,14 @@ def verify_record_artifacts(
     return tuple(captures)
 
 
-def verify_record_digest(record_path: Path, expected: str) -> None:
-    """Compare the record's bytes with the digest captured by the gate run.
+def verify_record_bytes(path: Path, data: bytes, expected: str) -> None:
+    """Compare these already-read record bytes with the digest the gate captured.
 
-    This runs before `read_record`, so a record changed after the gate wrote it
-    is refused without being parsed. The expected value must come from outside
-    the workspace that holds the record and artifacts; that separation is what
-    stops a record and its artifacts being replaced together.
+    `data` is exactly the buffer the caller will parse. It is not hashed again
+    from the path, so a record changed between a hash read and a parse read
+    cannot pass. The expected value must come from outside the workspace that
+    holds the record and artifacts; that separation is what stops a record and
+    its artifacts being replaced together.
     """
     if not is_digest(expected):
         raise GateError(
@@ -878,15 +896,29 @@ def verify_record_digest(record_path: Path, expected: str) -> None:
             "lowercase SHA-256 digest. Pass the exact value the gate printed "
             "when it wrote the record."
         )
-    actual = record_digest(record_path)
+    actual = hashlib.sha256(data).hexdigest()
     if actual != expected:
         raise GateError(
-            f"the gate record {record_path} hashes to {actual}, not the digest "
+            f"the gate record {path} hashes to {actual}, not the digest "
             f"{expected} captured when the gate wrote it. The record changed "
             "after the gate ran, so preflight will not parse it or ask the "
             "registry anything. Re-run the gate and use the digest that run "
             "printed (in CI, the gate step's output)."
         )
+
+
+def read_checked_record(path: Path, expected: str) -> ReleaseRecord:
+    """Read the record once, verify those bytes, and parse those same bytes.
+
+    The digest check and the parser share one buffer, so a record swapped on
+    disk after the read cannot be parsed. A record changed before the read is
+    refused against the captured digest without being interpreted.
+    """
+    data = read_record_bytes(path)
+    verify_record_bytes(path, data, expected)
+    if _record_swap_hook is not None:
+        _record_swap_hook(path)
+    return parse_record(path, data)
 
 
 def consume_record(
@@ -897,12 +929,12 @@ def consume_record(
 ) -> tuple[ReleaseRecord, tuple[Capture, ...]]:
     """Load and fully validate the record before any plan is considered.
 
-    The record digest is verified first. Without it, a record and its artifacts
-    rewritten together would agree with each other and preflight could not tell
-    the pair from the gate's output.
+    The record digest is verified first, on the same bytes that are then
+    parsed. Without it, a record and its artifacts rewritten together would
+    agree with each other and preflight could not tell the pair from the gate's
+    output.
     """
-    verify_record_digest(record_path, expected_record_sha256)
-    record = read_record(record_path)
+    record = read_checked_record(record_path, expected_record_sha256)
     validate_commit(root, record)
     validate_manifests(root, record)
     validate_checkout(root, record)
@@ -918,8 +950,7 @@ def recheck_record(
     expected_record_sha256: str,
 ) -> None:
     """Re-prove the record before a human acts on the plan."""
-    verify_record_digest(record_path, expected_record_sha256)
-    current = read_record(record_path)
+    current = read_checked_record(record_path, expected_record_sha256)
     if current != record:
         raise GateError(
             f"the gate record {record_path} changed while preflight was running. "
@@ -1763,9 +1794,11 @@ def self_check(
         "the tree is clean; the gate record is rejected when its commit, manifest "
         "or artifact changes between gate and preflight, and a record and "
         "artifact mutated together are rejected against the digest captured when "
-        "the gate wrote the record; mismatched and matching-but-yanked states "
-        "block with zero pending publishes, and this program has no publishing "
-        "path."
+        "the gate wrote the record; a different record swapped in between the "
+        "digest read and the parse is never the record that gets parsed, by "
+        "consume_record or recheck_record; mismatched and matching-but-yanked "
+        "states block with zero pending publishes, and this program has no "
+        "publishing path."
     )
 
 
@@ -1989,6 +2022,17 @@ def verify_record_between_gate_and_preflight(
             description="preflight reports both members at the recorded digest",
         )
         print("   ok: preflight consumes the gate record and prints its digests")
+
+        # The digest check and the parser must read the record once. A swap in
+        # the window between a would-be hash read and a would-be parse read must
+        # not change what is parsed, for both record consumers.
+        verify_record_bytes_are_the_parsed_bytes(
+            sandbox,
+            record_path,
+            record,
+            record_digest,
+            artifact_dir,
+        )
 
         core_record = record.members[0]
         last_record = record.members[-1]
@@ -2264,6 +2308,115 @@ def verify_record_between_gate_and_preflight(
         print("   ok: a fresh group prints the ordered manual plan and no upload")
     finally:
         remove_owned(sandbox, work)
+
+
+def verify_record_bytes_are_the_parsed_bytes(
+    root: Path,
+    record_path: Path,
+    record: ReleaseRecord,
+    record_digest: str,
+    artifact_dir: Path,
+) -> None:
+    """The digest check and the parser must consume one read of the record.
+
+    Reading the record once for the digest and again for JSON is a window: the
+    file can be replaced in between, so the comparison passes on bytes that were
+    never parsed and the parser accepts bytes that were never compared. The
+    self-test hook fires inside that window and replaces the record with a
+    different, still well-formed one whose commit would fail validation if it
+    were ever parsed. Both consumers must return the record they verified, not
+    the file the hook wrote.
+    """
+    global _record_swap_hook
+
+    original = record_path.read_bytes()
+    if hashlib.sha256(original).hexdigest() != record_digest:
+        raise GateError(
+            "self-test: the record does not hash to the digest captured for it"
+        )
+    replacement = serialize_record(
+        ReleaseRecord(
+            commit="0" * len(record.commit),
+            clean=record.clean,
+            members=record.members,
+        )
+    )
+    if replacement == original:
+        raise GateError("self-test: the substituted record is not different")
+    if hashlib.sha256(replacement).hexdigest() == record_digest:
+        raise GateError(
+            "self-test: the substituted record hashes to the captured digest, so "
+            "the swap would be invisible"
+        )
+
+    swapped: list[Path] = []
+
+    def swap(path: Path) -> None:
+        path.write_bytes(replacement)
+        if path.read_bytes() != replacement:
+            raise GateError("self-test: the record swap did not reach the file")
+        swapped.append(path)
+
+    try:
+        _record_swap_hook = swap
+        consumed, captures = consume_record(
+            root, record_path, artifact_dir, record_digest
+        )
+    except GateError as error:
+        raise GateError(
+            "self-test: consume_record parsed a record that was swapped in after "
+            f"its digest was checked: {error}"
+        ) from error
+    finally:
+        _record_swap_hook = None
+
+    if len(swapped) != 1:
+        raise GateError(
+            "self-test: consume_record no longer reads and verifies the record in "
+            "one step, so the swap window is not observable"
+        )
+    if record_path.read_bytes() != replacement:
+        raise GateError(
+            "self-test: the record was not swapped while consume_record ran"
+        )
+    if consumed != record:
+        raise GateError(
+            "self-test: consume_record parsed bytes its digest check did not cover"
+        )
+    if tuple(capture.digest for capture in captures) != tuple(
+        member.sha256 for member in record.members
+    ):
+        raise GateError(
+            "self-test: consume_record did not report the recorded artifact digests"
+        )
+    record_path.write_bytes(original)
+
+    swapped.clear()
+    try:
+        _record_swap_hook = swap
+        recheck_record(root, record_path, record, artifact_dir, record_digest)
+    except GateError as error:
+        raise GateError(
+            "self-test: recheck_record parsed a record that was swapped in after "
+            f"its digest was checked: {error}"
+        ) from error
+    finally:
+        _record_swap_hook = None
+
+    if len(swapped) != 1:
+        raise GateError(
+            "self-test: recheck_record no longer reads and verifies the record in "
+            "one step, so the swap window is not observable"
+        )
+    if record_path.read_bytes() != replacement:
+        raise GateError(
+            "self-test: the record was not swapped while recheck_record ran"
+        )
+    record_path.write_bytes(original)
+    print(
+        "   ok: the digest check and the parser consume one read, so a record "
+        "swapped in between is neither parsed by consume_record nor recheck_record"
+    )
 
 
 def run_preflight_record(

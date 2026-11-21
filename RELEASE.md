@@ -171,7 +171,9 @@ to the gate run; it does not make the filesystem trustworthy.
 `preflight` consumes the record rather than re-deriving it. Before it asks
 crates.io anything or prints a plan, it checks:
 
-- the record's bytes hash to the digest captured when the gate wrote it;
+- the record's bytes hash to the digest captured when the gate wrote it, and the
+  bytes parsed are exactly those bytes: the digest and the parse share one read,
+  so a record swapped in between is refused rather than parsed unchecked;
 - the record's commit equals `HEAD`;
 - the record was written from a clean checkout, and the checkout is still clean;
 - each member's manifest is the one the record names, at the recorded version and
