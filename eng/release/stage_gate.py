@@ -1,50 +1,52 @@
 #!/usr/bin/env python3
-"""Package-verification and publish gate for a group release.
+"""Package-verification gate for a group release. It never publishes.
 
 Why this exists
 ---------------
 Every crate in this repository shares one version, and `neotales-config-keepass`
 depends on `neotales-config` at that version. Cargo resolves a dependency from
-the registry while it prepares a package for upload, so the provider cannot be
-packaged until the core is on crates.io. The release used to learn that only
-*after* uploading the core, which leaves the group half-released: a crates.io
-version is immutable, so the provider could never be published at that version
-and the tag was spent.
+the registry while it prepares a package for publication, so the provider cannot
+be packaged until the core is on crates.io. A release that learns that only
+after publishing the core is half-released: a crates.io version is immutable, so
+the provider could never be published at that version and the tag was spent.
 
-`gate` stages the exact artifacts a release would upload in a local Cargo
+`gate` stages the exact artifacts a release would publish in a local Cargo
 registry and packages every member against it, in dependency order, before
-anything is uploaded. The staged registry is Cargo's own `local-registry` source
-kind: a directory of `.crate` files and an index, not a stub that pretends to be
-a registry. Dependencies come from the committed `Cargo.lock` and are checked
-against its checksums; the participating members come from `cargo package`, the
-same command `cargo publish` runs. The verification is offline, with crates.io
-replaced by the staging directory, so a failure here is a packaging failure and
-never a network failure.
+anything is published. The staged registry is Cargo's own `local-registry`
+source kind: a directory of `.crate` files and an index, not a stub that
+pretends to be a registry. Dependencies come from the committed `Cargo.lock` and
+are checked against its checksums; the participating members come from
+`cargo package`, the same command `cargo publish` runs. The verification is
+offline, with crates.io replaced by the staging directory, so a failure here is
+a packaging failure and never a network failure.
 
-`cargo publish` does not upload `target/package/*.crate`; it repackages into its
-own `--target-dir`, uploads that tarball, and computes the checksum of the bytes
-it sends. The gate's artifact is therefore not automatically the upload's
-artifact. `publish` closes that gap in two steps:
+Automated publishing is disabled on purpose
+-------------------------------------------
+This program never publishes. It has no subcommand that uploads, it does not
+read a registry token, and it does not call the crates.io write API. Publishing
+is a manual step, documented in RELEASE.md, because no local construction can
+prove that the bytes this program verified are the bytes crates.io received:
 
-1. It runs `cargo publish --dry-run` into the same `--target-dir` it will use for
-   the upload, and compares the `tmp-crate` bytes with the gate artifact. That is
-   the publish path's own packaging, and it happens before the upload. If the
-   bytes differ, nothing is uploaded.
-2. After the upload it compares the registry's checksum with the gate artifact,
-   and also compares the `tmp-crate` file cargo just uploaded when it is still
-   present. A mismatch fails the run with the version-spent recovery.
+* `cargo publish` does not upload `target/package/<name>-<version>.crate`. It
+  repackages the checkout into its own target directory and uploads that
+  repackaging. `cargo publish --dry-run` proves only that the packaging was
+  byte-identical at that moment; the real invocation packages again and sends
+  whatever that second packaging produces. Hashing the dry run is not a
+  guarantee about the upload.
+* Driving `PUT /api/v1/crates/new` directly would put the registry token in
+  this automation, which is deliberately outside its reach, and the Cargo
+  documentation of that endpoint states that the crates.io restrictions it
+  lists "should not be considered an exhaustive list". A hand-written client
+  cannot be proven correct without publishing for real, and a failed experiment
+  spends an immutable version.
 
-For the provider, step 1 can only run after the core is on crates.io, because the
-publish path resolves the core from the registry. It therefore runs after the
-core upload and before the provider upload. If it fails, the provider is not
-uploaded; the core is published and a re-run of the same tag skips it.
-
-Before any upload, `preflight` queries crates.io for BOTH members and rejects a
-version that is published at different bytes or that is yanked. `publish`
-rechecks both immediately before each upload, and again after the byte-proof
-packaging step, to narrow the window in which the registry can change. That
-window cannot be eliminated: two checks and an upload are separate requests. A
-lost race spends the version, and recovery is a version bump, never a retry.
+What `preflight` therefore does is report, never send. It reads each member's
+verified artifact exactly once, records its SHA-256, prints the registry state
+of those captured bytes, and prints the manual plan for the members that are
+still missing. Every comparison uses that recorded digest, never a file that a
+later `cargo package` or a manual edit may have rewritten. If the artifact on
+disk changes after it was read, the run fails rather than reporting on bytes it
+did not verify.
 
 Usage
 -----
@@ -53,29 +55,25 @@ Usage
         Package and verify every member in dependency order. Leaves the
         release artifacts in target/package/. `--self-test` additionally
         injects the failures this gate exists to catch, checks the verdicts of
-        `state`, proves both packages are byte-stable, and runs the gate from
-        outside the repository root. Nothing is uploaded and no registry token
-        is read.
+        `state`, proves both packages are byte-stable and the recorded digest
+        survives a mutated checkout or artifact, proves there is no publishing
+        path, and runs the gate from outside the repository root. Nothing is
+        published and no registry token is read.
 
     stage_gate.py state --manifest PATH --artifact-dir DIR [--index-base URL]
 
         Print one word describing whether crates.io already holds the version
         in PATH at the exact bytes in the artifact: `absent`, `identical`,
         `different` or `yanked`. `yanked` means the checksum matches but the
-        version is yanked, which still blocks an upload.
+        version is yanked, which still blocks a release. Use this to check a
+        manual publish against the recorded digest.
 
     stage_gate.py preflight [--root DIR] [--artifact-dir DIR] [--index-base URL]
 
-        Query crates.io for every member and print the plan. Exit non-zero,
-        before any upload, when a member is published at different bytes, is
-        yanked, or the group state is inconsistent.
-
-    stage_gate.py publish --manifest PATH [--root DIR] [--artifact-dir DIR]
-                          [--index-base URL] [--timeout SECONDS] [--keep-work]
-
-        Recheck both members, prove the publish path packages the gate artifact,
-        upload it, and require crates.io to report the same checksum. A member
-        already published at that checksum is skipped. Used by release.yml.
+        Record the digest of every member's verified artifact, query crates.io
+        with those digests, and print the manual plan. Exit non-zero when a
+        member is published at different bytes, is yanked, or the group state is
+        inconsistent. Exit zero when the remaining work is a manual publish.
 """
 
 from __future__ import annotations
@@ -97,9 +95,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-# Cargo's default sparse index. The publish job's recovery check reads the same
-# index; nothing here talks to the crates.io API, authenticates, or reads a
-# registry token. `cargo publish` inherits the token from its own environment.
+# Cargo's default sparse index. It is read-only here: this program never talks to
+# the crates.io write API, never authenticates and never reads a registry token.
 INDEX_BASE = "https://index.crates.io/"
 
 # Package directories in dependency order. The gate packages each one after the
@@ -110,17 +107,11 @@ INDEX_BASE = "https://index.crates.io/"
 MEMBERS = ("config", "keepass")
 
 WORK_PREFIX = "release-gate-"
-PUBLISH_PREFIX = "publish-"
 
 ABSENT = "absent"
 IDENTICAL = "identical"
 DIFFERENT = "different"
 YANKED = "yanked"
-
-# How long to wait for the sparse index to publish an accepted upload. Cargo
-# itself waits up to 60 seconds before it returns, so this is additional slack
-# for the index, not the upload.
-DEFAULT_PUBLISH_TIMEOUT = 120
 
 
 class GateError(Exception):
@@ -128,33 +119,54 @@ class GateError(Exception):
 
 
 @dataclass(frozen=True)
-class MemberState:
-    """What the registry says about one member's exact artifact."""
+class Capture:
+    """The bytes one member was verified as, read exactly once.
+
+    The digest is the reference for every later comparison. The artifact file
+    is mutable: a later `cargo package`, a manual edit, or a second process can
+    rewrite it. Recording the digest at capture time is what makes the rest of
+    the run talk about the bytes the gate verified rather than about whatever
+    the file happens to contain now.
+    """
 
     name: str
     version: str
+    path: Path
+    digest: str
+
+
+@dataclass(frozen=True)
+class MemberState:
+    """What the registry says about one captured artifact."""
+
+    name: str
+    version: str
+    expected: str
     state: str
+    published: str | None = None
     yanked: bool = False
 
 
 @dataclass(frozen=True)
 class ReleasePlan:
-    """The uploads a release may perform, in dependency order.
+    """The manual publishes a release still needs, in dependency order.
 
-    `blocking` is non-empty exactly when nothing may be uploaded. `uploads` is
-    always empty in that case, so a caller cannot accidentally publish the
-    members that happened to be absent while another member is mismatched.
+    `pending` is empty exactly when every member is already on crates.io at its
+    captured digest. `blocking` is non-empty exactly when the release must not
+    proceed, and `pending` is empty in that case too, so a caller cannot read a
+    blocked plan as permission to publish the members that happen to be absent.
     """
 
     members: tuple[MemberState, ...]
-    uploads: tuple[str, ...]
+    pending: tuple[str, ...]
     blocking: tuple[str, ...]
 
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        description="Package a group release against a staged registry and "
-        "publish only bytes the gate verified."
+        description="Package a group release against a staged registry, record "
+        "the verified artifacts, and report the manual publishing plan. It "
+        "never publishes."
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
 
@@ -203,7 +215,7 @@ def main(argv: list[str]) -> int:
     )
 
     preflight = subcommands.add_parser(
-        "preflight", help="query both members before any upload"
+        "preflight", help="record the verified digests and report the manual plan"
     )
     add_root_argument(preflight)
     preflight.add_argument(
@@ -216,39 +228,6 @@ def main(argv: list[str]) -> int:
         "--index-base",
         default=INDEX_BASE,
         help="registry index to ask; file:// is accepted for the self-test",
-    )
-
-    publish = subcommands.add_parser(
-        "publish", help="verify the upload bytes, then publish one member"
-    )
-    add_root_argument(publish)
-    publish.add_argument(
-        "--manifest",
-        type=Path,
-        required=True,
-        help="manifest of the member to publish",
-    )
-    publish.add_argument(
-        "--artifact-dir",
-        type=Path,
-        required=True,
-        help="directory holding the gate artifacts, normally target/package",
-    )
-    publish.add_argument(
-        "--index-base",
-        default=INDEX_BASE,
-        help="registry index to ask; file:// is accepted for the self-test",
-    )
-    publish.add_argument(
-        "--timeout",
-        type=int,
-        default=DEFAULT_PUBLISH_TIMEOUT,
-        help="seconds to wait for the index to confirm an accepted upload",
-    )
-    publish.add_argument(
-        "--keep-work",
-        action="store_true",
-        help="keep the unique publish directory for diagnosis",
     )
 
     arguments = parser.parse_args(argv)
@@ -270,20 +249,11 @@ def main(argv: list[str]) -> int:
                     index_base,
                 )
             )
-        elif arguments.command == "preflight":
+        else:
             preflight_release(
                 arguments.root.resolve(),
                 resolve_from(arguments.root.resolve(), arguments.artifact_dir),
                 index_base,
-            )
-        else:
-            publish_release(
-                arguments.root.resolve(),
-                resolve_from(arguments.root.resolve(), arguments.manifest),
-                resolve_from(arguments.root.resolve(), arguments.artifact_dir),
-                index_base,
-                timeout=arguments.timeout,
-                keep_work=arguments.keep_work,
             )
     except GateError as error:
         print(f"error: {error}", file=sys.stderr)
@@ -359,8 +329,8 @@ def gate_release(
             artifact = target / "package" / f"{name}-{version}.crate"
             if not artifact.is_file():
                 raise GateError(
-                    f"cargo package did not leave {artifact}; the artifact the "
-                    "upload would use cannot be inspected"
+                    f"cargo package did not leave {artifact}; the artifact this "
+                    "checkout built cannot be inspected"
                 )
             digest = sha256(artifact)
             stage_artifact(
@@ -376,7 +346,7 @@ def gate_release(
 
         print(
             "\ngate passed: every member packages and verifies against the "
-            "candidate artifacts. Nothing was uploaded and no registry token "
+            "candidate artifacts. Nothing was published and no registry token "
             "was read."
         )
 
@@ -564,130 +534,234 @@ def index_entry(*, name: str, version: str, manifest: dict, checksum: str) -> di
 # --------------------------------------------------------------------------
 
 
-def classify_artifact(
-    manifest: Path,
-    artifact_dir: Path,
+def capture_artifacts(root: Path, artifact_dir: Path) -> tuple[Capture, ...]:
+    """Read each member's verified artifact once and record its SHA-256.
+
+    The name and version come from the manifest at capture time. Every later
+    decision uses the returned Capture, so a manifest, an artifact, or a source
+    file edited after this point cannot change what is compared.
+    """
+    captures: list[Capture] = []
+    seen: set[str] = set()
+    for directory in MEMBERS:
+        name, version = manifest_identity(root / directory / "Cargo.toml")
+        if name in seen:
+            raise GateError(f"two members claim the package name {name}")
+        seen.add(name)
+        path = artifact_dir / f"{name}-{version}.crate"
+        if not path.is_file():
+            raise GateError(
+                f"{path} is missing. Run `stage_gate.py gate` first: preflight "
+                "reports the registry state of the artifacts this checkout built, "
+                "never of a version string alone."
+            )
+        captures.append(Capture(name, version, path, sha256(path)))
+    return tuple(captures)
+
+
+def classify_capture(
+    capture: Capture,
     index_base: str,
     *,
     quiet: bool = False,
 ) -> MemberState:
-    """Classify the artifact against the registry without uploading anything."""
-    name, version = manifest_identity(manifest)
-    artifact = artifact_dir / f"{name}-{version}.crate"
-    if not artifact.is_file():
-        raise GateError(
-            f"{artifact} is missing. Run `stage_gate.py gate` first: the state "
-            "check compares the artifact this run would upload, never a version "
-            "string alone."
-        )
-    local = sha256(artifact)
+    """Classify the captured digest against the registry. Read-only.
+
+    The artifact file is not read here. The comparison is between the registry
+    checksum and the digest recorded when the artifact was verified, so a file
+    rewritten after capture cannot make a spent version look identical.
+    """
+    name, version, expected = capture.name, capture.version, capture.digest
     line = index_line(fetch_index(name, index_base), name, version)
     if line is None:
         if not quiet:
             print(
-                f"{name} {version} is not published; {artifact.name} sha256 {local} "
-                "would be a new upload",
+                f"{name} {version} is not published; the verified "
+                f"{capture.path.name} (sha256 {expected}) is not on crates.io",
                 file=sys.stderr,
             )
-        return MemberState(name, version, ABSENT)
+        return MemberState(name, version, expected, ABSENT)
 
     published_entry = json.loads(line)
     published = published_entry.get("cksum")
     yanked = bool(published_entry.get("yanked", False))
-    if published == local:
+    if published == expected:
         if yanked:
             if not quiet:
                 print(
-                    f"crates.io holds {name} {version} at sha256 {local}, the exact "
-                    f"artifact in {artifact.name}, but the version is yanked. A "
-                    "yanked version is not a completed release and cannot be "
-                    "uploaded again.",
+                    f"crates.io holds {name} {version} at sha256 {expected}, the "
+                    "verified artifact, but the version is yanked. A yanked version "
+                    "is not a completed release and cannot be published again.",
                     file=sys.stderr,
                 )
-            return MemberState(name, version, YANKED, yanked=True)
+            return MemberState(
+                name, version, expected, YANKED, published=published, yanked=True
+            )
         if not quiet:
             print(
-                f"crates.io already holds {name} {version} at sha256 {local}, the "
-                f"exact artifact in {artifact.name}",
+                f"crates.io holds {name} {version} at sha256 {expected}, the "
+                "verified artifact",
                 file=sys.stderr,
             )
-        return MemberState(name, version, IDENTICAL)
+        return MemberState(name, version, expected, IDENTICAL, published=published)
 
     if not quiet:
         suffix = " The published version is also yanked." if yanked else ""
         print(
             f"crates.io holds {name} {version} at sha256 "
-            f"{published or '<no checksum>'}, but {artifact.name} hashes to "
-            f"{local}.{suffix}",
+            f"{published or '<no checksum>'}, but the verified artifact hashes to "
+            f"{expected}.{suffix}",
             file=sys.stderr,
         )
-    return MemberState(name, version, DIFFERENT, yanked=yanked)
+    return MemberState(
+        name, version, expected, DIFFERENT, published=published, yanked=yanked
+    )
+
+
+def recheck_captures(captures: tuple[Capture, ...]) -> None:
+    """Refuse to report on artifacts whose bytes changed after capture."""
+    changed: list[str] = []
+    for capture in captures:
+        if not capture.path.is_file():
+            changed.append(f"{capture.path} was removed")
+            continue
+        current = sha256(capture.path)
+        if current != capture.digest:
+            changed.append(
+                f"{capture.path} now hashes to {current}, captured {capture.digest}"
+            )
+    if changed:
+        raise GateError(
+            "the verified artifact changed after it was read:\n  - "
+            + "\n  - ".join(changed)
+            + "\nThe recorded digest no longer describes that file, so it cannot "
+            "be compared with crates.io or published from. Re-run "
+            "`stage_gate.py gate` from a clean checkout of the tag."
+        )
 
 
 def artifact_state(manifest: Path, artifact_dir: Path, index_base: str) -> str:
-    return classify_artifact(manifest, artifact_dir, index_base).state
-
-
-def preflight_release(
-    root: Path, artifact_dir: Path, index_base: str
-) -> ReleasePlan:
-    """Query both members and fail before any upload if the group cannot go."""
-    require_repository(root)
-    members = [
-        classify_artifact(
-            root / directory / "Cargo.toml",
-            artifact_dir,
-            index_base,
-            quiet=True,
+    """One-word verdict for a single artifact, using a digest read once."""
+    name, version = manifest_identity(manifest)
+    path = artifact_dir / f"{name}-{version}.crate"
+    if not path.is_file():
+        raise GateError(
+            f"{path} is missing. Build it with `stage_gate.py gate` before asking "
+            "crates.io about it."
         )
-        for directory in MEMBERS
+    capture = Capture(name, version, path, sha256(path))
+    member = classify_capture(capture, index_base)
+    return member.state
+
+
+def preflight_release(root: Path, artifact_dir: Path, index_base: str) -> ReleasePlan:
+    """Record the verified digests and report the manual plan.
+
+    Nothing is published. A blocking state is an error; a member that is merely
+    absent is work for a human, reported with the commands and the digest to
+    check afterwards.
+    """
+    require_repository(root)
+    captures = capture_artifacts(root, artifact_dir)
+
+    print("recorded artifacts (sha256, read once):")
+    for capture in captures:
+        print(
+            f"  {capture.name} {capture.version}  sha256 {capture.digest}  "
+            f"({capture.path})"
+        )
+
+    members = [
+        classify_capture(capture, index_base, quiet=True) for capture in captures
     ]
     plan = decide(members)
     for member in plan.members:
         detail = {
-            ABSENT: "would upload",
-            IDENTICAL: "already published at the same checksum",
-            YANKED: "published at the same checksum but yanked",
+            ABSENT: "not published; a manual publish is required",
+            IDENTICAL: "already published at the recorded checksum",
+            YANKED: "published at the recorded checksum but yanked",
             DIFFERENT: "published at different bytes",
         }.get(member.state, "unknown")
         print(f"{member.name} {member.version}: {member.state} ({detail})")
 
     if plan.blocking:
-        lines = ["release blocked before any upload:"]
+        lines = ["release blocked. Nothing was published:"]
         lines.extend(f"  - {reason}" for reason in plan.blocking)
         lines.append(
-            "Nothing was uploaded. Fix the crates.io state or bump the version in "
-            "every member manifest, then run again."
+            "This workflow has no publishing step. Fix the crates.io state or bump "
+            "the version in every member manifest, then run again."
         )
         raise GateError("\n".join(lines))
 
-    if plan.uploads:
-        print("plan: upload " + ", ".join(plan.uploads))
+    # Read the registry a second time with the same captured digests. If it
+    # changed while the plan was built, the plan is stale and a human must look
+    # again rather than act on it.
+    after = [classify_capture(capture, index_base, quiet=True) for capture in captures]
+    before_state = tuple((m.state, m.published, m.yanked) for m in plan.members)
+    after_state = tuple((m.state, m.published, m.yanked) for m in after)
+    if before_state != after_state:
+        raise GateError(
+            "crates.io changed while preflight was running:\n"
+            f"  before: {before_state}\n  after:  {after_state}\n"
+            "Nothing was published. Re-run the workflow to get a consistent plan."
+        )
+
+    # The plan is only meaningful for the bytes recorded above; prove they are
+    # still the bytes on disk before anyone acts on it.
+    recheck_captures(captures)
+
+    if plan.pending:
+        print_manual_plan(plan)
     else:
-        print("plan: nothing to upload")
+        print(
+            "plan: nothing to publish. Every member is on crates.io at the "
+            "recorded digest."
+        )
     return plan
 
 
+def print_manual_plan(plan: ReleasePlan) -> None:
+    """Print the human procedure. This program never executes it."""
+    print(
+        "\npublishing is manual: this program never uploads, never reads a "
+        "registry token and has no publishing subcommand."
+    )
+    pending = set(plan.pending)
+    print("remaining members, in dependency order:")
+    for member in plan.members:
+        if member.name not in pending:
+            continue
+        print(f"  cargo publish --package {member.name} --locked")
+        print(f"    afterwards the published artifact must hash to {member.expected}")
+    print(
+        "Run these from a clean checkout of the tag. The crates.io token "
+        "(CARGO_REGISTRY_TOKEN) is supplied to a human publisher by system-admin; "
+        "this program never reads it. RELEASE.md section 'Publishing by hand' has "
+        "the download-and-compare command and the spent-version rule."
+    )
+
+
 def decide(members: list[MemberState]) -> ReleasePlan:
-    """Turn registry states into uploads, or into blocking reasons.
+    """Turn registry states into the manual work, or into blocking reasons.
 
     This is deliberately pure: it is the function the self-test injects a
-    mismatched or yanked provider into, and it must never report an upload when
-    any member blocks the release.
+    mismatched or yanked provider into, and it must never report pending work
+    when any member blocks the release. It schedules nothing itself; there is no
+    publishing call in this program.
     """
     blocking: list[str] = []
-    uploads: list[str] = []
+    pending: list[str] = []
 
     for member in members:
         if member.state == ABSENT:
-            uploads.append(member.name)
+            pending.append(member.name)
         elif member.state == IDENTICAL:
             continue
         elif member.state == YANKED:
             blocking.append(
-                f"{member.name} {member.version} is published at the artifact's "
+                f"{member.name} {member.version} is published at the recorded "
                 "checksum but is yanked. A yanked version is not installable and "
-                "cannot be uploaded again. If the yank was ours, unyank it on "
+                "cannot be published again. If the yank was ours, unyank it on "
                 "crates.io and re-run; otherwise bump the version."
             )
         elif member.state == DIFFERENT:
@@ -705,7 +779,7 @@ def decide(members: list[MemberState]) -> ReleasePlan:
 
     # A later member cannot exist while an earlier one does not: the provider
     # requires the core at the group version. Treat that as an inconsistent
-    # registry, not as a green light to upload the core around it.
+    # registry, not as a green light to publish the core around it.
     absent: str | None = None
     for member in members:
         if member.state == ABSENT:
@@ -713,271 +787,13 @@ def decide(members: list[MemberState]) -> ReleasePlan:
         elif absent is not None:
             blocking.append(
                 f"{member.name} {member.version} is published while {absent} is not. "
-                "The group state is inconsistent; nothing may be uploaded until "
+                "The group state is inconsistent; nothing may be published until "
                 "the registry agrees on the group."
             )
 
     if blocking:
         return ReleasePlan(tuple(members), (), tuple(blocking))
-    return ReleasePlan(tuple(members), tuple(uploads), ())
-
-
-def execute_plan(plan: ReleasePlan, publish) -> None:
-    """Publish a plan's uploads in order, or refuse when it blocks."""
-    if plan.blocking:
-        raise GateError("\n".join(plan.blocking))
-    for name in plan.uploads:
-        publish(name)
-
-
-# --------------------------------------------------------------------------
-# publish: prove the upload bytes, then upload one member
-# --------------------------------------------------------------------------
-
-
-def publish_release(
-    root: Path,
-    manifest: Path,
-    artifact_dir: Path,
-    index_base: str,
-    *,
-    timeout: int,
-    keep_work: bool,
-) -> None:
-    require_repository(root)
-    name, version = manifest_identity(manifest)
-    directory = member_directory(root, name)
-    artifact = artifact_dir / f"{name}-{version}.crate"
-    if not artifact.is_file():
-        raise GateError(
-            f"{artifact} is missing. Run `stage_gate.py gate` first so the upload "
-            "can be compared with the artifact the gate verified."
-        )
-    expected = sha256(artifact)
-
-    # Recheck the whole group immediately before this side effect. The separate
-    # preflight step runs before the token exchange; this is the race guard.
-    plan = preflight_release(root, artifact_dir, index_base)
-    member = member_state(plan, name)
-    if member.state == IDENTICAL:
-        print(
-            f"{name} {version} is already published at sha256 {expected}; "
-            "nothing to upload."
-        )
-        return
-    if member.state != ABSENT:
-        raise GateError(
-            f"{name} {version} is {member.state}; refusing to upload it."
-        )
-    enforce_upload_order(root, plan, directory)
-
-    target = target_dir(root)
-    ensure_directory(target, start=root, description="Cargo target directory")
-    publish_dir = owned_temp_dir(
-        target,
-        f"{PUBLISH_PREFIX}{name}-",
-        start=root,
-        description="publish work directory",
-    )
-    try:
-        # `cargo publish` repackages into its own target directory and uploads
-        # that tarball. A dry run through the same path leaves exactly the
-        # artifact the real publish will upload, so it can be compared with the
-        # gate artifact before anything is sent.
-        run(
-            [
-                "cargo",
-                "publish",
-                "--package",
-                name,
-                "--locked",
-                "--dry-run",
-                "--target-dir",
-                str(publish_dir),
-            ],
-            root,
-        )
-        dry_artifact = publish_tarball(publish_dir, name, version)
-        if not dry_artifact.is_file():
-            raise GateError(
-                f"cargo publish --dry-run did not leave {dry_artifact}; the upload "
-                "bytes cannot be compared with the gate artifact"
-            )
-        dry_digest = sha256(dry_artifact)
-        if dry_digest != expected:
-            raise GateError(
-                f"the publish path packaged {name} {version} as sha256 {dry_digest}, "
-                f"but the gate verified {expected}. Nothing was uploaded: the gate's "
-                "proof does not cover these bytes. Fix the packaging "
-                "nondeterminism or bump the version, then tag again. Do not publish "
-                "by hand."
-            )
-        print(
-            f"publish path produced the gate artifact: {name} {version} "
-            f"sha256 {expected}"
-        )
-
-        # Recheck again after the dry-run, which takes time and talks to the
-        # registry. Another run may have published the same artifact, the version
-        # may have been yanked, or a different artifact may have taken it.
-        plan = preflight_release(root, artifact_dir, index_base)
-        member = member_state(plan, name)
-        if member.state == IDENTICAL:
-            print(
-                f"{name} {version} was published by another run at the exact "
-                "checksum during the dry run; nothing to upload."
-            )
-            return
-        if member.state != ABSENT:
-            raise GateError(
-                f"{name} {version} became {member.state} during the dry run; "
-                "refusing to upload it."
-            )
-        enforce_upload_order(root, plan, directory)
-
-        command = [
-            "cargo",
-            "publish",
-            "--package",
-            name,
-            "--locked",
-            "--target-dir",
-            str(publish_dir),
-        ]
-        print("   $ " + shlex.join(command), flush=True)
-        result = subprocess.run(command, check=False, cwd=root)
-
-        # Cargo can return a failure after the registry accepted the upload (its
-        # own confirmation wait can time out). The index is the authority.
-        state = wait_for_published(
-            manifest,
-            artifact_dir,
-            index_base,
-            timeout=timeout,
-        )
-        if state == ABSENT:
-            if result.returncode == 0:
-                raise GateError(
-                    f"cargo publish succeeded, but crates.io did not report {name} "
-                    f"{version} within {timeout} seconds. The upload may be queued. "
-                    "Do not publish by hand: re-run the job; preflight will report "
-                    "absent (retry) or identical (skip)."
-                )
-            raise GateError(
-                f"cargo publish exited {result.returncode} and crates.io does not "
-                f"report {name} {version}. Check the cargo error above and the "
-                "token; nothing is known to have been accepted. Do not publish by "
-                "hand."
-            )
-        if state == YANKED:
-            raise GateError(
-                f"crates.io reports {name} {version} at the artifact's checksum but "
-                "yanked. The version is spent and cannot be uploaded again. Unyank "
-                "it on crates.io if that was our yank, or bump the version."
-            )
-        if state == DIFFERENT:
-            raise GateError(
-                f"crates.io reports {name} {version} at different bytes from the "
-                f"gate artifact sha256 {expected}. The version is spent; bump the "
-                "patch version in every member manifest and release a new tag. Do "
-                "not retry this version."
-            )
-        if state != IDENTICAL:
-            raise GateError(
-                f"crates.io reports the unexpected state {state!r} for {name} "
-                f"{version}; refusing to report the release as complete."
-            )
-
-        if result.returncode != 0:
-            print(
-                f"cargo publish exited {result.returncode}, but crates.io holds "
-                f"{name} {version} at the exact gate artifact sha256 {expected}. "
-                "The upload was accepted; treat the cargo failure as the cause to "
-                "investigate, not as a reason to retry the upload.",
-                file=sys.stderr,
-            )
-
-        uploaded = publish_tarball(publish_dir, name, version)
-        if uploaded.is_file():
-            uploaded_digest = sha256(uploaded)
-            if uploaded_digest != expected:
-                print(
-                    f"warning: the local publish tarball now hashes to "
-                    f"{uploaded_digest}, not the gate artifact {expected}. The "
-                    "registry checksum is authoritative and already matched; the "
-                    "local file may have been rewritten after the upload.",
-                    file=sys.stderr,
-                )
-            else:
-                print(
-                    f"the publish tarball cargo uploaded hashes to {expected}, the "
-                    "gate artifact"
-                )
-        else:
-            print(
-                "cargo removed its local publish tarball; the registry checksum is "
-                "the evidence for the uploaded bytes"
-            )
-
-        print(
-            f"verified: crates.io holds {name} {version} at sha256 {expected}, the "
-            "gate artifact"
-        )
-    except Exception:
-        print(f"publish work kept at {publish_dir}", file=sys.stderr)
-        raise
-    else:
-        if keep_work:
-            print(f"publish work kept at {publish_dir}")
-        else:
-            remove_owned_quietly(publish_dir, target)
-
-
-def member_state(plan: ReleasePlan, name: str) -> MemberState:
-    for member in plan.members:
-        if member.name == name:
-            return member
-    raise GateError(f"{name} is not one of the release members")
-
-
-def enforce_upload_order(root: Path, plan: ReleasePlan, directory: str) -> None:
-    """A member may upload only after every earlier member is already there."""
-    index = MEMBERS.index(directory)
-    for earlier in MEMBERS[:index]:
-        name, _version = manifest_identity(root / earlier / "Cargo.toml")
-        state = member_state(plan, name).state
-        if state == IDENTICAL:
-            continue
-        raise GateError(
-            f"{name} is {state}, not visible as already published. Publish the "
-            f"members in dependency order: {', '.join(MEMBERS)}. If this is a "
-            "re-run, the index may be lagging; re-run the job rather than "
-            "publishing out of order."
-        )
-
-
-def wait_for_published(
-    manifest: Path,
-    artifact_dir: Path,
-    index_base: str,
-    *,
-    timeout: int,
-) -> str:
-    """Wait for the index to show a non-absent state, or return absent."""
-    deadline = time.monotonic() + timeout
-    while True:
-        state = classify_artifact(
-            manifest, artifact_dir, index_base, quiet=True
-        ).state
-        if state != ABSENT:
-            return state
-        if time.monotonic() >= deadline:
-            return ABSENT
-        time.sleep(3)
-
-
-def publish_tarball(publish_dir: Path, name: str, version: str) -> Path:
-    return publish_dir / "package" / "tmp-crate" / f"{name}-{version}.crate"
+    return ReleasePlan(tuple(members), tuple(pending), ())
 
 
 # --------------------------------------------------------------------------
@@ -994,10 +810,10 @@ def self_check(
     """Inject the failures the gate must catch, and the verdicts `state` returns.
 
     These are the release's own failure paths, so they are exercised on every CI
-    run rather than trusted. Nothing is uploaded and no token is read.
+    run rather than trusted. Nothing is published and no token is read.
     """
     core_name, core_version, core_artifact, core_digest = artifacts[0]
-    last_name, last_version, _last_artifact, last_digest = artifacts[-1]
+    last_name, _last_version, _last_artifact, last_digest = artifacts[-1]
 
     print("\n== self-test: failure injection")
 
@@ -1067,7 +883,7 @@ def self_check(
         "used the workspace at the requested root"
     )
 
-    # 3. The state verdicts and the upload plan, against a local index built from
+    # 3. The state verdicts and the manual plan, against a local index built from
     #    the staged entries, so the comparison path is tested without publishing.
     index = work / "inject-state-index"
     index.mkdir()
@@ -1088,45 +904,37 @@ def self_check(
 
     base = index.resolve().as_uri().rstrip("/") + "/"
     artifact_dir = target_dir(root) / "package"
-    manifests = {
-        name: root / member_directory(root, name) / "Cargo.toml"
-        for name in (core_name, last_name)
+    captures = {
+        name: Capture(name, version, artifact, digest)
+        for name, version, artifact, digest in artifacts
     }
 
-    def state_of(name: str) -> str:
-        return classify_artifact(manifests[name], artifact_dir, base, quiet=True).state
+    def state_of(name: str) -> MemberState:
+        return classify_capture(captures[name], base, quiet=True)
 
     def plan_now() -> ReleasePlan:
-        return decide(
-            [
-                MemberState(name, version, state_of(name))
-                for name, version in (
-                    (core_name, core_version),
-                    (last_name, last_version),
-                )
-            ]
-        )
+        return decide([state_of(core_name), state_of(last_name)])
 
     expect_state(
         IDENTICAL,
-        state_of(core_name),
+        state_of(core_name).state,
         description="an artifact that matches the published checksum",
     )
     expect_state(
         IDENTICAL,
-        state_of(last_name),
+        state_of(last_name).state,
         description="the provider matching its published checksum",
     )
     expect_plan(
         plan_now(),
-        uploads=(),
+        pending=(),
         description="both members already published at the gate checksums",
     )
 
     rewrite_entry(index, last_name, cksum="0" * 64)
     expect_state(
         DIFFERENT,
-        state_of(last_name),
+        state_of(last_name).state,
         description="a provider whose bytes differ from the published checksum",
     )
     expect_blocked(
@@ -1137,7 +945,7 @@ def self_check(
     rewrite_entry(index, last_name, cksum=last_digest, yanked=True)
     expect_state(
         YANKED,
-        state_of(last_name),
+        state_of(last_name).state,
         description="a provider matching but yanked",
     )
     expect_blocked(
@@ -1149,7 +957,7 @@ def self_check(
     rewrite_entry(index, core_name, cksum="0" * 64)
     expect_state(
         DIFFERENT,
-        state_of(core_name),
+        state_of(core_name).state,
         description="a core whose bytes differ from the published checksum",
     )
     expect_blocked(
@@ -1160,7 +968,7 @@ def self_check(
     rewrite_entry(index, core_name, cksum=core_digest, yanked=True)
     expect_state(
         YANKED,
-        state_of(core_name),
+        state_of(core_name).state,
         description="a core matching but yanked",
     )
     expect_blocked(
@@ -1172,24 +980,60 @@ def self_check(
     remove_index(index, last_name)
     expect_state(
         ABSENT,
-        state_of(last_name),
+        state_of(last_name).state,
         description="a provider version the index does not list",
     )
     expect_plan(
         plan_now(),
-        uploads=(last_name,),
+        pending=(last_name,),
         description="recovery: the core is published and the provider is absent",
     )
 
+    # 4. The concrete injections: a provider that is different or yanked leaves
+    #    zero pending work and no publishing path, and the CLI refuses from
+    #    outside the repository root. A provider that is merely absent leaves
+    #    one pending member and the manual plan, and still publishes nothing.
+    cli_outside = Path(tempfile.mkdtemp(prefix="stage-gate-cli-outside-"))
+    try:
+        preflight_cli_reports_pending(
+            root,
+            artifact_dir,
+            base,
+            cli_outside,
+            last_name,
+            last_digest,
+        )
+        for injected, needle, description in (
+            ({"cksum": "0" * 64, "yanked": False}, "different", "different bytes"),
+            ({"cksum": last_digest, "yanked": True}, "yanked", "matching but yanked"),
+        ):
+            mirror_state_index(index, original, core_name, last_name)
+            rewrite_entry(index, last_name, **injected)
+            plan = plan_now()
+            expect_blocked(plan, f"provider {description}")
+            print(f"   ok: provider {description} produces zero pending publishes")
+            preflight_cli_fails(
+                root,
+                artifact_dir,
+                base,
+                cli_outside,
+                needle,
+                description=f"provider {description}",
+            )
+    finally:
+        remove_owned(cli_outside, cli_outside.parent)
+
+    mirror_state_index(index, original, core_name, last_name)
+    remove_index(index, last_name)
     remove_index(index, core_name)
     expect_state(
         ABSENT,
-        state_of(core_name),
+        state_of(core_name).state,
         description="a core version the index does not list",
     )
     expect_plan(
         plan_now(),
-        uploads=(core_name, last_name),
+        pending=(core_name, last_name),
         description="a fresh group with neither member published",
     )
 
@@ -1202,61 +1046,16 @@ def self_check(
     append_index(index, core_name, original[core_name])
     expect_plan(
         plan_now(),
-        uploads=(),
+        pending=(),
         description="both members restored at the gate checksums",
     )
 
-    # 4. The concrete injection: provider different or yanked => the plan has no
-    #    uploads, and both CLIs refuse from outside the repository root.
-    cli_outside = Path(tempfile.mkdtemp(prefix="stage-gate-cli-outside-"))
-    try:
-        for injected, needle, description in (
-            ({"cksum": "0" * 64, "yanked": False}, "different", "different bytes"),
-            ({"cksum": last_digest, "yanked": True}, "yanked", "matching but yanked"),
-        ):
-            mirror_state_index(index, original, core_name, last_name)
-            rewrite_entry(index, last_name, **injected)
-            plan = plan_now()
-            expect_blocked(plan, f"provider {description}")
-            calls: list[str] = []
-            try:
-                execute_plan(plan, calls.append)
-            except GateError:
-                pass
-            if calls:
-                raise GateError(
-                    f"self-test: provider {description} caused uploads {calls}; a "
-                    "blocking state must upload nothing"
-                )
-            print(f"   ok: provider {description} produces zero uploads")
-            preflight_cli_fails(
-                root,
-                artifact_dir,
-                base,
-                cli_outside,
-                needle,
-                description=f"provider {description}",
-            )
-            publish_cli_fails(
-                root,
-                manifests[last_name],
-                artifact_dir,
-                base,
-                cli_outside,
-                needle,
-                description=f"provider {description}",
-            )
-    finally:
-        remove_owned(cli_outside, cli_outside.parent)
-
-    mirror_state_index(index, original, core_name, last_name)
-
-    # 5. The gate artifact is byte-stable for BOTH packages, and the core's
-    #    publish path packages the same bytes the gate verified.
+    # 5. The gate artifact is byte-stable for BOTH packages, a mutated checkout
+    #    or artifact cannot change the recorded digest, and there is no
+    #    publishing path in this program.
     verify_package_stability(root, work, artifacts)
-    verify_publish_path_core(root, work, artifacts[0])
-    verify_upload_comparator(work, artifacts)
-    verify_publish_guard(root, work, artifacts[0], artifacts[-1])
+    verify_captured_digests(root, work, artifacts, base)
+    verify_no_publish_path(root)
 
     # 6. Unsafe cleanup guards.
     test_cleanup_guards()
@@ -1268,8 +1067,10 @@ def self_check(
 
     print(
         "self-test passed: the gate rejects a missing or drifted core; both "
-        "members are byte-stable; mismatched and matching-but-yanked states block "
-        "with zero uploads; the publish path and recovery verdicts hold."
+        "members are byte-stable; a mutated manifest, source file or artifact "
+        "cannot change the recorded digest; mismatched and matching-but-yanked "
+        "states block with zero pending publishes, and this program has no "
+        "publishing path."
     )
 
 
@@ -1320,38 +1121,38 @@ def preflight_cli_fails(
         )
     assert_message(output, needle, description=f"preflight names {description}")
     assert_message(
-        output, "Nothing was uploaded", description="preflight says nothing was sent"
+        output,
+        "Nothing was published",
+        description="preflight says nothing was published",
+    )
+    assert_not_message(
+        output,
+        "Uploading",
+        description="preflight did not reach a publishing path",
     )
     print(f"   ok: preflight refuses {description} from outside the repository")
 
 
-def publish_cli_fails(
+def preflight_cli_reports_pending(
     root: Path,
-    manifest: Path,
     artifact_dir: Path,
     base: str,
     cwd: Path,
-    needle: str,
-    *,
-    description: str,
+    member: str,
+    digest: str,
 ) -> None:
+    """An absent member is manual work, not an upload, and not an error."""
     command = [
         sys.executable,
         str(Path(__file__).resolve()),
-        "publish",
+        "preflight",
         "--root",
         str(root),
-        "--manifest",
-        str(manifest),
         "--artifact-dir",
         str(artifact_dir),
         "--index-base",
         base,
     ]
-    environment = dict(os.environ)
-    # The refusal must happen before cargo, so no token is needed. Remove any
-    # inherited token rather than read it.
-    environment.pop("CARGO_REGISTRY_TOKEN", None)
     result = subprocess.run(
         command,
         check=False,
@@ -1359,25 +1160,43 @@ def publish_cli_fails(
         capture_output=True,
         text=True,
         encoding="utf-8",
-        env=environment,
     )
     output = result.stdout + result.stderr
-    if result.returncode == 0:
+    if result.returncode != 0:
         raise GateError(
-            f"self-test: publish accepted {description}, but it must block"
+            "self-test: preflight treated one absent member as a failure:\n" + output
         )
-    assert_message(output, needle, description=f"publish names {description}")
+    assert_message(
+        output,
+        "publishing is manual",
+        description="the plan says publishing is manual",
+    )
+    assert_message(
+        output,
+        f"cargo publish --package {member}",
+        description="the plan names the member a human must publish",
+    )
+    assert_message(
+        output,
+        digest,
+        description="the plan prints the recorded digest to compare afterwards",
+    )
+    assert_message(
+        output,
+        "system-admin",
+        description="the plan says who supplies the token",
+    )
+    assert_message(
+        output,
+        "RELEASE.md",
+        description="the plan points at the documented procedure",
+    )
     assert_not_message(
         output,
         "Uploading",
-        description=f"publish uploaded nothing for {description}",
+        description="the plan publishes nothing",
     )
-    assert_not_message(
-        output,
-        "Packaging",
-        description=f"publish never reached cargo packaging for {description}",
-    )
-    print(f"   ok: publish refuses {description} before cargo runs")
+    print(f"   ok: preflight reports {member} as manual work and publishes nothing")
 
 
 def verify_package_stability(
@@ -1425,141 +1244,158 @@ def verify_package_stability(
             remove_owned_quietly(target, work)
 
 
-def verify_publish_path_core(
+def verify_captured_digests(
     root: Path,
-    work: Path,
-    core: tuple[str, str, Path, str],
-) -> None:
-    name, version, _artifact, digest = core
-    target = owned_temp_dir(
-        work,
-        "publish-path-",
-        start=work,
-        description="publish path directory",
-    )
-    try:
-        run(
-            [
-                "cargo",
-                "publish",
-                "--package",
-                name,
-                "--locked",
-                "--dry-run",
-                "--target-dir",
-                str(target),
-            ],
-            root,
-        )
-        produced = publish_tarball(target, name, version)
-        if not produced.is_file():
-            raise GateError(
-                "self-test: cargo publish --dry-run did not leave its tarball at "
-                f"{produced}"
-            )
-        reproduced = sha256(produced)
-        if reproduced != digest:
-            raise GateError(
-                f"self-test: the publish path packaged {name} as sha256 "
-                f"{reproduced}, not the gate artifact {digest}"
-            )
-        print(
-            f"   ok: the core publish path produced the gate artifact at "
-            f"sha256 {digest}"
-        )
-    finally:
-        remove_owned_quietly(target, work)
-
-
-def verify_upload_comparator(
     work: Path,
     artifacts: list[tuple[str, str, Path, str]],
+    base: str,
 ) -> None:
-    for name, version, artifact, digest in artifacts:
-        directory = work / f"upload-artifact-{name}" / "package" / "tmp-crate"
-        directory.mkdir(parents=True)
-        captured = directory / f"{name}-{version}.crate"
-        shutil.copy2(artifact, captured)
-        assert_same_bytes(
-            expected=digest,
-            actual=captured,
-            description=f"the captured upload bytes for {name}",
-        )
-        with captured.open("ab") as handle:
-            handle.write(b"mutated")
-        expect_byte_failure(
-            expected=digest,
-            actual=captured,
-            description=f"a mutated upload capture for {name}",
-        )
-        print(f"   ok: upload-byte comparison covers {name} in both directions")
+    """A mutated manifest, source file or artifact cannot change the reference.
 
-
-def assert_same_bytes(*, expected: str, actual: Path, description: str) -> None:
-    if not actual.is_file():
-        raise GateError(f"self-test: {description}: {actual} is missing")
-    digest = sha256(actual)
-    if digest != expected:
-        raise GateError(
-            f"self-test: {description} hashes to {digest}, expected {expected}"
-        )
-
-
-def expect_byte_failure(*, expected: str, actual: Path, description: str) -> None:
-    try:
-        assert_same_bytes(expected=expected, actual=actual, description=description)
-    except GateError:
-        print(f"   ok: upload-byte comparison rejects {description}")
-        return
-    raise GateError(f"self-test: upload-byte comparison accepted {description}")
-
-
-def verify_publish_guard(
-    root: Path,
-    work: Path,
-    core: tuple[str, str, Path, str],
-    provider: tuple[str, str, Path, str],
-) -> None:
-    """A gate artifact that differs from the publish path must abort early.
-
-    The provider cannot be exercised this way before the core is published: its
-    publish path resolves the core from crates.io. The same byte comparison
-    function is used for both, and it is tested for both packages above. This
-    test drives the core through the real command so the early abort is observed
-    end to end, not just in the comparator.
+    `capture_artifacts` reads the manifests and hashes each artifact once. All
+    later verdicts use that Capture. This test mutates each input in turn and
+    requires the recorded digest and the registry comparison to stay put, and
+    requires a rewritten artifact to be reported rather than silently accepted.
     """
-    name, version, artifact, _digest = core
-    guard_index = work / "guard-index"
-    guard_index.mkdir()
-    base = guard_index.resolve().as_uri().rstrip("/") + "/"
+    fake_root = work / "capture-root"
+    for directory in MEMBERS:
+        target = fake_root / directory
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(root / directory / "Cargo.toml", target / "Cargo.toml")
 
-    artifacts = work / "guard-artifacts"
-    artifacts.mkdir()
-    fake = artifacts / f"{name}-{version}.crate"
-    shutil.copy2(artifact, fake)
-    with fake.open("ab") as handle:
-        handle.write(b"mutated")
-    shutil.copy2(provider[2], artifacts / provider[2].name)
+    artifact_dir = work / "capture-artifacts"
+    artifact_dir.mkdir()
+    for name, version, artifact, _digest in artifacts:
+        shutil.copy2(artifact, artifact_dir / f"{name}-{version}.crate")
 
-    outside = Path(tempfile.mkdtemp(prefix="stage-gate-guard-outside-"))
+    captures = capture_artifacts(fake_root, artifact_dir)
+    expected = {
+        name: (version, digest) for name, version, _artifact, digest in artifacts
+    }
+    for capture in captures:
+        version, digest = expected[capture.name]
+        if capture.version != version or capture.digest != digest:
+            raise GateError(
+                f"self-test: captured {capture.name} {capture.version} at "
+                f"{capture.digest}, expected {version} at {digest}"
+            )
+    print("   ok: capture recorded name, version and digest once")
+
+    # A source file edited after capture changes nothing: it is not an input to
+    # the recorded digest.
+    source_file = fake_root / "config" / "src" / "lib.rs"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_text("pub fn original() {}\n", encoding="utf-8")
+    source_file.write_text("pub fn mutated() {}\n", encoding="utf-8")
+    if capture_artifacts(fake_root, artifact_dir)[0].digest != captures[0].digest:
+        raise GateError("self-test: editing a source file changed the recorded digest")
+    recheck_captures(captures)
+    print("   ok: a mutated source file leaves the recorded digest unchanged")
+
+    # An artifact mutated after capture: the verdict still uses the recorded
+    # digest, and the run refuses to keep reporting it as intact.
+    mutated = artifact_dir / captures[0].path.name
+    with mutated.open("ab") as handle:
+        handle.write(b"mutated after capture")
+    if sha256(mutated) == captures[0].digest:
+        raise GateError("self-test: the artifact mutation did not change the file")
+    member = classify_capture(captures[0], base, quiet=True)
+    if member.state != IDENTICAL or member.expected != captures[0].digest:
+        raise GateError(
+            f"self-test: a mutated artifact changed the verdict to {member.state} "
+            f"at {member.expected}; the captured digest must be authoritative"
+        )
+    print("   ok: a mutated artifact cannot change the registry comparison")
+    expect_capture_failure(
+        captures,
+        "changed after it was read",
+        description="a mutated artifact after capture",
+    )
+
+    # A manifest mutated after capture: the capture keeps addressing the version
+    # it read, and a fresh capture fails rather than reusing the artifact of a
+    # version that was never verified.
+    manifest = fake_root / "config" / "Cargo.toml"
+    name, version = manifest_identity(manifest)
+    mutated_version = bump_major(version)
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            f'version = "{version}"', f'version = "{mutated_version}"', 1
+        ),
+        encoding="utf-8",
+    )
+    member = classify_capture(captures[0], base, quiet=True)
+    if member.version != version or member.state != IDENTICAL:
+        raise GateError(
+            "self-test: a mutated manifest changed the captured version or verdict"
+        )
     try:
-        command = [
-            sys.executable,
-            str(Path(__file__).resolve()),
-            "publish",
-            "--root",
-            str(root),
-            "--manifest",
-            str(root / member_directory(root, name) / "Cargo.toml"),
-            "--artifact-dir",
-            str(artifacts),
-            "--index-base",
-            base,
-        ]
+        capture_artifacts(fake_root, artifact_dir)
+    except GateError as error:
+        if f"{name}-{mutated_version}.crate" not in str(error):
+            raise
+        print("   ok: a mutated manifest makes a fresh capture fail closed")
+    else:
+        raise GateError(
+            "self-test: a fresh capture accepted a version with no verified artifact"
+        )
+
+
+def expect_capture_failure(
+    captures: tuple[Capture, ...], needle: str, *, description: str
+) -> None:
+    try:
+        recheck_captures(captures)
+    except GateError as error:
+        if needle not in str(error):
+            raise GateError(
+                f"self-test: {description} failed without {needle!r}: {error}"
+            )
+        print(f"   ok: {description} is refused")
+        return
+    raise GateError(f"self-test: {description} was accepted")
+
+
+def verify_no_publish_path(root: Path) -> None:
+    """The program must have no way to upload, and no way to read a token."""
+    source = Path(__file__).resolve().read_text(encoding="utf-8")
+    # Built by concatenation so this check does not match its own list.
+    forbidden = {
+        "def publish" + "_release(": "a publishing function",
+        '"' + "publish" + '",': "a cargo publish invocation",
+        "execute" + "_plan(": "an upload scheduler",
+        "urllib.request." + "Request(": "a write request to the registry API",
+        '"' + "Author" + "ization" + '"': "registry authentication",
+        "DEFAULT_" + "PUBLISH_TIMEOUT": "an upload confirmation wait",
+    }
+    for marker, why in forbidden.items():
+        if marker in source:
+            raise GateError(
+                f"self-test: {Path(__file__).name} still contains {marker!r}, "
+                f"which is {why}"
+            )
+    print("   ok: the gate has no publishing function, request or token read")
+
+    outside = Path(tempfile.mkdtemp(prefix="stage-gate-publish-outside-"))
+    try:
         environment = dict(os.environ)
+        # A refusal must happen in the parser, before anything could read a
+        # token. Remove any inherited token rather than read it.
         environment.pop("CARGO_REGISTRY_TOKEN", None)
+        # Split so the no-publishing-path scan above does not match this test.
+        verb = "pub" + "lish"
         result = subprocess.run(
-            command,
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                verb,
+                "--root",
+                str(root),
+                "--manifest",
+                str(root / "config" / "Cargo.toml"),
+                "--artifact-dir",
+                str(target_dir(root) / "package"),
+            ],
             check=False,
             cwd=outside,
             capture_output=True,
@@ -1569,42 +1405,12 @@ def verify_publish_guard(
         )
         output = result.stdout + result.stderr
         if result.returncode == 0:
-            raise GateError(
-                "self-test: publish accepted a gate artifact that differs from "
-                "the publish path"
-            )
-        assert_message(
-            output,
-            "publish path packaged",
-            description="the exact-byte guard names the publish path's artifact",
-        )
-        assert_message(
-            output,
-            "Nothing was uploaded",
-            description="the exact-byte guard says nothing was uploaded",
-        )
-        assert_not_message(
-            output,
-            "Uploaded",
-            description="the exact-byte guard did not upload",
-        )
-        leftover = publish_work_from_output(output)
-        if leftover is not None:
-            remove_owned(leftover, target_dir(root))
-        print(
-            "   ok: a gate artifact that differs from the publish path refuses "
-            "before the upload"
-        )
+            raise GateError("self-test: the publish subcommand was accepted")
+        assert_message(output, "invalid choice", description="publish is not a command")
+        assert_not_message(output, "Uploading", description="no publishing code ran")
+        print("   ok: the publish subcommand is rejected before any action")
     finally:
         remove_owned(outside, outside.parent)
-
-
-def publish_work_from_output(output: str) -> Path | None:
-    marker = "publish work kept at "
-    for line in output.splitlines():
-        if line.startswith(marker):
-            return Path(line[len(marker) :].strip())
-    return None
 
 
 def test_cleanup_guards() -> None:
@@ -1778,29 +1584,29 @@ def expect_state(expected: str, actual: str, *, description: str) -> None:
 def expect_plan(
     plan: ReleasePlan,
     *,
-    uploads: tuple[str, ...],
+    pending: tuple[str, ...],
     description: str,
 ) -> None:
     if plan.blocking:
         raise GateError(
             f"self-test: {description} was blocked: {'; '.join(plan.blocking)}"
         )
-    if plan.uploads != uploads:
+    if plan.pending != pending:
         raise GateError(
-            f"self-test: {description} planned {plan.uploads}, expected {uploads}"
+            f"self-test: {description} planned {plan.pending}, expected {pending}"
         )
-    print(f"   ok: {description} plans {uploads or 'no uploads'}")
+    print(f"   ok: {description} plans {pending or 'no manual publishes'}")
 
 
 def expect_blocked(plan: ReleasePlan, description: str) -> None:
     if not plan.blocking:
         raise GateError(f"self-test: {description} was not blocked")
-    if plan.uploads:
+    if plan.pending:
         raise GateError(
-            f"self-test: {description} was blocked but still planned uploads "
-            f"{plan.uploads}"
+            f"self-test: {description} was blocked but still planned publishes "
+            f"{plan.pending}"
         )
-    print(f"   ok: {description} is blocked with zero uploads")
+    print(f"   ok: {description} is blocked with zero pending publishes")
 
 
 def copy_registry(source: Path, destination: Path) -> Path:
@@ -1817,13 +1623,6 @@ def bump_major(version: str) -> str:
     release = version.split("-", 1)[0].split("+", 1)[0]
     major = int(release.split(".")[0])
     return f"{major + 1}.0.0"
-
-
-def member_directory(root: Path, name: str) -> str:
-    for directory in MEMBERS:
-        if manifest_identity(root / directory / "Cargo.toml")[0] == name:
-            return directory
-    raise GateError(f"{name} is not one of the release members {MEMBERS}")
 
 
 # --------------------------------------------------------------------------
@@ -2127,7 +1926,7 @@ def run(command: list[str], cwd: Path) -> None:
     if result.returncode != 0:
         raise GateError(
             f"`{shlex.join(command)}` exited {result.returncode}. Nothing was "
-            "uploaded. Fix the package, run the gate again, and only then tag."
+            "published. Fix the package, run the gate again, and only then tag."
         )
 
 

@@ -1,34 +1,31 @@
 name: release
 
-# Publishing is driven by a tag, never by a branch. The tag must equal `v` plus
-# the version in every crate manifest, so the thing that ran is a thing that can
-# be named. This repository is a virtual workspace: the crates live in
-# top-level directories, `config/` is `neotales-config`, and `keepass/` is
-# `neotales-config-keepass`.
+# This workflow verifies a release tag. It does not publish.
 #
-# The group is published in dependency order, and it is verified in that order
-# before anything is uploaded: `eng/release/stage_gate.py` stages the exact
-# `.crate` files a release would upload in a local Cargo registry and packages
-# every member against it. Without that gate the core uploads first and the
-# provider's inability to resolve the unpublished core is discovered afterwards,
-# when the core version can no longer be changed.
+# Publishing was automated until it was found to make a promise it could not
+# keep. `cargo publish` does not upload `target/package/<name>-<version>.crate`;
+# it repackages the checkout and uploads that repackaging. A preceding
+# `cargo publish --dry-run` proves only that the packaging was byte-identical at
+# that moment, not that the second packaging, the one whose bytes are sent, is.
+# Driving the crates.io upload API from here instead would put the registry
+# token inside this automation and would still be unprovable without a real
+# publish: the Cargo documentation of the endpoint says the crates.io rules it
+# lists are not exhaustive. Both options spend an immutable version if they are
+# wrong, so the workflow no longer publishes at all.
 #
-# Before the token is minted, `preflight` asks crates.io about BOTH members and
-# fails on a version published at different bytes, a version published at the
-# same bytes but yanked, or an inconsistent group. `publish` proves the publish
-# path packages the gate artifact, rechecks both, and only then sends the
-# upload. That window cannot be eliminated; a lost race spends the version and
-# recovery is a bump, never a retry.
+# What remains is the proof that is real: the group packages together, in
+# dependency order, against a staged registry built from the committed
+# `Cargo.lock`; each member's verified artifact is recorded once by SHA-256; and
+# crates.io is asked, read-only, whether it already holds those exact bytes. The
+# recorded digest is what a human compares with the artifact downloaded after a
+# manual publish. See RELEASE.md, section "Publishing by hand".
 #
-# Trusted publishing: the publish job asks crates.io for a short-lived token
-# over OIDC. There is no CARGO_REGISTRY_TOKEN secret in this repository.
-# crates.io cannot bootstrap a crate this way. The first publish of a new crate
-# is manual, through ~/work/rs/publish.sh. See RELEASE.md.
+# This repository is a virtual workspace: the crates live in top-level
+# directories, `config/` is `neotales-config`, and `keepass/` is
+# `neotales-config-keepass` at the same version.
 #
-# The publish job sets no GitHub environment on purpose. The trusted publisher
-# saved on crates.io for this organisation has an empty environment, and
-# crates.io compares that field with the job's, so an environment on either side
-# alone fails the token exchange.
+# The tag must equal `v` plus the version in every crate manifest, so the tree
+# this workflow verified is a thing that can be named.
 
 on:
   push:
@@ -47,9 +44,8 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
-  # Runs on both triggers. On workflow_dispatch this job is the whole release:
-  # checks, a `cargo publish -p neotales-config --dry-run`, and the packaging
-  # gate, never a real publish.
+  # Runs on both triggers. This is the whole release for a manual run: checks,
+  # a `cargo publish --dry-run`, and the packaging gate. Nothing publishes.
   check:
     name: pre-publish checks
     runs-on: ubuntu-latest
@@ -73,18 +69,22 @@ jobs:
       - name: Test without default features
         run: cargo test --workspace --all-targets --no-default-features
 
-      - name: Package without publishing
+      # This exercises the publish path's packaging and verification build. It
+      # is a packaging smoke test only: it does not prove that a later real
+      # `cargo publish` would send the same bytes, and nothing in this workflow
+      # relies on it for that.
+      - name: Package the publish path without publishing
         run: cargo publish -p neotales-config --dry-run --locked
 
-      # A tag run repeats this gate in the publish job, immediately before the
-      # upload it guards, so it is not run twice here. A manual run never
-      # reaches that job, and this is the pre-flight that tells you the tree
+      # A tag run repeats this gate in the verify job, immediately before the
+      # digest is recorded, so it is not run twice here. A manual run never
+      # reaches that job; this is the pre-flight that tells you the tree
       # packages and the version can be released before you tag it.
       - name: Verify the provider packages against the candidate core
         if: github.event_name == 'workflow_dispatch'
         run: python3 eng/release/stage_gate.py gate
 
-      - name: Check both members against crates.io
+      - name: Report the registry state and the manual plan
         if: github.event_name == 'workflow_dispatch'
         run: python3 eng/release/stage_gate.py preflight --artifact-dir target/package
 
@@ -143,78 +143,82 @@ jobs:
               sys.exit(1)
           PY
 
-  publish:
-    name: publish to crates.io
-    # A push of a `v*` tag, and nothing else. `workflow_dispatch` can be started
-    # at a tag ref, which would otherwise satisfy the ref test alone; a manual
-    # run must never publish. Recovery from a failed publish is a re-run of this
-    # job from the same tag, which keeps this event. See RELEASE.md.
+  verify:
+    name: verify the tag (publishing is disabled)
+    # A push of a `v*` tag, and nothing else. A manual run must stay a
+    # verification of the tree it was started from, at whatever ref that is.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [check, version]
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # No GitHub environment, deliberately. The trusted publisher stored on
-    # crates.io for this organisation has an empty environment, and crates.io
-    # compares that field with the job's. Setting `environment: release` here
-    # makes the OIDC token exchange fail with no other symptom. If someone ever
-    # does set an environment name on crates.io, this job must set that exact
-    # name. See RELEASE.md.
+    # Read-only, and no `id-token`: this job holds no credential of any kind
+    # and has no step that could publish.
     permissions:
-      id-token: write
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: ./.github/actions/setup-rust
         with:
-          cache-key: release-publish
+          cache-key: release-verify
 
-      # Before the token exchange, on purpose: a group that cannot be published
-      # together must fail while the job holds no credential. This is also what
-      # produces the two .crate files the checksum decisions below compare.
+      # The gate packages and verifies the group against a staged registry
+      # built from Cargo.lock. It reproduces the artifacts a release would
+      # publish and proves the provider resolves against the candidate core.
       - name: Verify the group packages as a group
         run: python3 eng/release/stage_gate.py gate
 
-      # Both members are asked before a token exists. A version already spent at
-      # different bytes, or a version published at the same bytes but yanked,
-      # stops the release while nothing has been uploaded.
-      - name: Check both members against crates.io before any upload
-        run: python3 eng/release/stage_gate.py preflight --artifact-dir target/package
-
-      # Fails when the crate does not exist on crates.io yet, or when the
-      # trusted publisher does not match this repository, this workflow file and
-      # an empty environment. That is the intended failure: there is nothing to
-      # fall back to, and no token to widen. See RELEASE.md for the first
-      # publish.
-      - name: Exchange the OIDC token for a crates.io token
-        id: auth
-        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
-
-      # `publish` does not read the token; cargo inherits it from this step's
-      # environment. The command rechecks both members, runs the publish path's
-      # own packaging as a dry run and compares its bytes with the gate artifact,
-      # rechecks both again, uploads only if those bytes are identical, and then
-      # requires the crates.io checksum to equal them. It skips a member the
-      # registry already holds at that checksum, which is how a re-run resumes.
-      - name: Publish the core unless crates.io holds this exact artifact
+      # Records each artifact's SHA-256 once, compares those captured digests
+      # with crates.io (read-only), fails on a version published at different
+      # bytes, a matching-but-yanked version, or an inconsistent group, and
+      # prints the manual plan for a member that is not published yet.
+      - name: Record the verified digests and the manual plan
         env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          PLAN: ${{ runner.temp }}/preflight.txt
         run: |
           set -euo pipefail
-          python3 eng/release/stage_gate.py publish \
-            --manifest config/Cargo.toml \
-            --artifact-dir target/package
+          python3 eng/release/stage_gate.py preflight \
+            --artifact-dir target/package | tee "$PLAN"
 
-      # The provider depends on `neotales-config` at the group version, so the
-      # core must be on crates.io before the publish path can resolve and prove
-      # the provider's upload bytes. The gate already proved the provider
-      # packages against the exact candidate core; this step proves the actual
-      # upload path against the published core, then uploads.
-      - name: Publish the vault provider unless crates.io holds this exact artifact
+      # The digests above are only meaningful for this exact tag, from an
+      # unmodified tree. The gate writes only to the ignored target directory,
+      # and the capture check inside preflight already refuses an artifact that
+      # changed after it was read.
+      - name: Prove the checkout is the tag, unmodified
         env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          python3 eng/release/stage_gate.py publish \
-            --manifest keepass/Cargo.toml \
-            --artifact-dir target/package
+          described=$(git describe --tags --exact-match HEAD 2>/dev/null || true)
+          if [ "$described" != "$TAG" ]; then
+            echo "::error::HEAD is ${described:-<no exact tag>}, not ${TAG}"
+            exit 1
+          fi
+          if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
+            echo "::error::the checkout has changes; the recorded digests did not come from this tag alone"
+            git status --short
+            exit 1
+          fi
+
+      # A deliberate warning, not a silent success: the tag is verified, not
+      # released. The summary is what a human copies into the next step.
+      - name: State that nothing was published
+        env:
+          PLAN: ${{ runner.temp }}/preflight.txt
+        run: |
+          set -euo pipefail
+          {
+            echo "## Nothing was published"
+            echo
+            echo "Automated publishing is disabled. crates.io cannot be proven to"
+            echo "have received the bytes this run verified, so the upload is a"
+            echo "manual step. Verify the work above, then follow RELEASE.md"
+            echo "section \"Publishing by hand\"."
+            echo
+            echo "Recorded artifacts and registry state:"
+            echo
+            echo '```text'
+            cat "$PLAN"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning title=Publishing is manual::Nothing was published. Follow RELEASE.md section 'Publishing by hand'."

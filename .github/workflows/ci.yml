@@ -95,14 +95,15 @@ jobs:
         with:
           cache-key: release-gate
 
-      # The release workflow runs this same script immediately before an upload.
-      # Here it runs with the failure injection: a gate that has never been seen
-      # rejecting anything is not a gate. The injection stages the registry
-      # without the core and with a drifted core version, rejects a provider or
-      # core published at different bytes or matching-but-yanked with zero
-      # uploads, proves both packages are byte-stable, compares the publish
-      # path's artifact with the gate artifact, and runs the gate from outside
-      # the repository root. Nothing is uploaded and no token is read.
+      # The release workflow runs this same script to verify a tag. Here it runs
+      # with the failure injection: a gate that has never been seen rejecting
+      # anything is not a gate. The injection stages the registry without the
+      # core and with a drifted core version, rejects a provider or core
+      # published at different bytes or matching-but-yanked with zero pending
+      # publishes, proves both packages are byte-stable, proves a mutated
+      # manifest, source file or artifact cannot change the recorded digest,
+      # proves the program has no publishing path or token read, and runs the
+      # gate from outside the repository root. Nothing is published.
       - name: Package the group against a staged registry
         run: python3 eng/release/stage_gate.py gate --self-test
 
