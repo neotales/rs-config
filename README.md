@@ -2,6 +2,8 @@
 
 `neotales-config` merges ordered configuration sources into one immutable, typed snapshot: later
 sources win per key, nested maps merge, and every node remembers the source that wrote it.
+`neotales-config-keepass` adds an opt-in KeePass KDBX source in a separate crate, so the core never
+compiles a vault codec.
 
 By [x0craft](https://github.com/x0craft).
 
@@ -14,6 +16,7 @@ under `crates/`.
 | Crate | Directory | README |
 | --- | --- | --- |
 | `neotales-config` | `config/` | [config/README.md](config/README.md) |
+| `neotales-config-keepass` | `keepass/` | [keepass/README.md](keepass/README.md) |
 
 A member exists only when it ships, so there are no placeholder crates. The shared toolchain,
 formatting, lint, audit, and release configuration live at the root and apply to every member.

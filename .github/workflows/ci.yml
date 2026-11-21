@@ -51,10 +51,38 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-targets --all-features
 
+      # The core has no default feature, and the vault provider's `reload`
+      # feature is opt-in. This leg builds and tests exactly that graph, so a
+      # provider cannot quietly become part of the default build.
+      - name: Test without default features
+        run: cargo test --workspace --all-targets --no-default-features
+
       - name: Documentation
         env:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --workspace --all-features --no-deps
+
+  core-graph:
+    name: core has no vault dependency
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: core-graph
+
+      # `neotales-config` is the core. It must not compile a KeePass codec or
+      # any cryptography for a caller that never registers the vault provider.
+      - name: The default core build has no KeePass code
+        run: |
+          set -euo pipefail
+          cargo tree -p neotales-config --no-default-features --edges normal | tee graph.txt
+          if grep -qi 'keepass' graph.txt; then
+            echo "::error::neotales-config depends on a KeePass crate in its default build"
+            exit 1
+          fi
 
   msrv:
     name: msrv
