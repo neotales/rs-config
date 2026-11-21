@@ -25,6 +25,7 @@ cargo add neotales-config@0.0.0-alpha.0 --features jsonc
 cargo add neotales-config@0.0.0-alpha.0 --features toml
 cargo add neotales-config@0.0.0-alpha.0 --features yaml
 cargo add neotales-config@0.0.0-alpha.0 --features ini
+cargo add neotales-config@0.0.0-alpha.0 --features reload
 ```
 
 The `dotenv`, `json`, `json5`, `jsonc`, `toml`, and `yaml` features add their parser crate.
@@ -43,6 +44,7 @@ crate.
 | `toml` | `Builder::toml_file`, `TomlFile` | TOML 1.1 | `toml` |
 | `yaml` | `Builder::yaml_file`, `YamlFile` | YAML 1.2 core schema | `saphyr`, `saphyr-parser` |
 | `ini` | `Builder::ini_file`, `IniFile` | the documented INI dialect | code |
+| `reload` | `Builder::build_reloadable`, `Reload` | source reload, subscriptions, opt-in polling | code, no thread until started |
 
 The formats are separate on purpose. Enabling `json` compiles no YAML parser, and a build with no
 feature has no parser in its dependency graph.
@@ -266,8 +268,8 @@ let config = Builder::new()
 ```
 
 The JSON5 and JSONC constructors are the same shape: `Json5File::new(path)` and
-`JsoncFile::new(path)`. A provider reads its path again on every load, so rebuilding or reloading
-the same source sees a replaced file. There is no watcher and no reload holder in this release.
+`JsoncFile::new(path)`. A provider reads its path again on every load, so building again or using
+the `reload` holder sees a replaced file.
 
 | Feature | Dialect | Root | Duplicate names | Number rule |
 | --- | --- | --- | --- | --- |
@@ -300,6 +302,47 @@ A line whose first non-whitespace character is `#` or `;` is a comment, and an i
 part of the value. One pair of matching wrapping quotes is removed and no escape or interpolation
 is interpreted. A repeated key keeps its last value; a repeated section header continues the
 existing section; a root scalar and a section with the same name reject the file.
+
+**Reload and watch.** The `reload` feature keeps the resolved sources beside the current immutable
+snapshot. `build_reloadable()` returns a cloneable `Reload`; `refresh()` reloads every source and
+publishes a new snapshot only when the merged values or their provenance differ. A failed read,
+parse, or validation leaves the previous good snapshot in place and reports a sanitized error.
+
+```rust,no_run
+use std::time::Duration;
+
+use neotales_config::{Builder, TomlFile};
+
+let reload = Builder::new()
+    .toml_file("app", TomlFile::new("config/app.toml"))
+    .build_reloadable()
+    .expect("the initial load succeeds");
+
+// Manual refresh; no thread and no watcher.
+let outcome = reload.refresh();
+println!("{outcome:?}");
+
+// An explicit polling watcher. Dropping the handle stops and joins its thread.
+let subscription = reload.subscribe();
+let watcher = reload
+    .start_watching(Duration::from_millis(250))
+    .expect("a file source is watchable");
+if let Ok(config) = subscription.recv_timeout(Duration::from_secs(5)) {
+    println!("http.port = {}", config.get::<u16>("http.port").unwrap());
+}
+watcher.stop();
+```
+
+Every file provider, including `DotenvFile`, reports its path through `Source::watch_paths`; a
+custom source can report its own stable files or return an empty list. Polling reads each watched
+file in full to fingerprint its bytes, so a short interval over a large file costs real I/O, and
+detection latency is the interval plus the refresh time. A partially written file fails safely and
+is retried after the next content change; write a temporary file and rename it to avoid a torn
+read. The baseline is captured before the initial load, so a change during startup is not lost.
+Refreshes are serialized, and subscribers coalesce independently to the newest snapshot. There is
+no async runtime, and no thread exists until `start_watching()` is called. A published snapshot
+holds plaintext, so do not log a `Config` that contains a secret. See the crate documentation for
+the full lifecycle, shutdown, error, and lifetime contract.
 
 **Implement a source.** A source returns a map root or a `SourceError` that carries a kind and no
 message. A closure implements `Source`, so a provider in another crate cannot leak a value through

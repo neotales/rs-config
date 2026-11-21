@@ -173,4 +173,8 @@ impl Source for DotenvFile {
     fn load(&self) -> Result<Value, SourceError> {
         self.build()
     }
+
+    fn watch_paths(&self) -> Vec<PathBuf> {
+        vec![self.path.clone()]
+    }
 }

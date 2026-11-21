@@ -99,6 +99,10 @@ impl Source for JsoncFile {
         }
         Ok(value)
     }
+
+    fn watch_paths(&self) -> Vec<PathBuf> {
+        vec![self.path.clone()]
+    }
 }
 
 /// Parses one JSONC document with only comments enabled beyond standard JSON.

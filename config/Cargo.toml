@@ -25,6 +25,10 @@ jsonc = ["dep:jsonc-parser"]
 toml = ["dep:toml"]
 yaml = ["dep:saphyr", "dep:saphyr-parser"]
 ini = []
+# `reload` adds the cloneable snapshot holder, manual refresh, change subscriptions, and an
+# explicit polling watcher. It uses only `std`: no parser, no async runtime, and no thread until
+# `Reload::start_watching` is called.
+reload = []
 
 [dependencies]
 serde = { version = "1.0", default-features = false, features = ["std"] }
@@ -39,6 +43,10 @@ saphyr-parser = { version = "0.0.12", default-features = false, optional = true 
 [dev-dependencies]
 serde = { version = "1.0", features = ["derive"] }
 tempfile = "3"
+
+[[example]]
+name = "reload"
+required-features = ["reload", "toml"]
 
 [lints]
 workspace = true

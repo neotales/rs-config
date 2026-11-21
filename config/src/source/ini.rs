@@ -107,6 +107,10 @@ impl Source for IniFile {
         let text = read_text(&self.path)?;
         parse(&text)
     }
+
+    fn watch_paths(&self) -> Vec<PathBuf> {
+        vec![self.path.clone()]
+    }
 }
 
 /// Parses one INI document into a map of root keys and sections.

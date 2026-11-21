@@ -104,6 +104,10 @@ impl Source for Json5File {
         }
         Ok(value)
     }
+
+    fn watch_paths(&self) -> Vec<PathBuf> {
+        vec![self.path.clone()]
+    }
 }
 
 /// Parses one JSON5 document and keeps every number exact where the model can.

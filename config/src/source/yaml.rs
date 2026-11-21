@@ -103,6 +103,10 @@ impl Source for YamlFile {
         }
         Ok(value)
     }
+
+    fn watch_paths(&self) -> Vec<PathBuf> {
+        vec![self.path.clone()]
+    }
 }
 
 /// Parses one YAML document into the value model.

@@ -1,6 +1,6 @@
 //! The source port, the source registration record, and the opt-in providers.
 
-use std::fmt;
+use std::{fmt, path::PathBuf};
 
 use crate::{error::SourceError, value::Value};
 
@@ -92,7 +92,8 @@ impl Deferred {
 ///
 /// Register one with [`crate::Builder::source`]. [`Source::load`] returns a complete value tree
 /// whose root is a [`Value::Map`]; any other root fails the build. A source is loaded once, in
-/// registration order, and never again for the life of the snapshot.
+/// registration order, for one snapshot. A [`crate::Reload`] built from the same builder loads
+/// every source again on each refresh; the core [`crate::Config`] never does.
 ///
 /// A source reports failure with a [`SourceError`], which carries a kind and no message. It must
 /// never put a value, a connection string, or parser text on that error.
@@ -119,6 +120,23 @@ pub trait Source: Send + Sync {
     /// [`SourceError::invalid`] when it rejected its own document, or
     /// [`SourceError::unrepresentable`] when a value cannot be held without loss.
     fn load(&self) -> Result<Value, SourceError>;
+
+    /// Returns the files whose contents decide what [`Source::load`] returns.
+    ///
+    /// A file-based provider returns its configured path here, and the `reload` feature polls
+    /// those paths when the caller explicitly starts a watcher. The default is an empty list, so
+    /// a source over a process, a network service, or a vault names only the stable local files
+    /// it reads, if any. A path that does not exist yet is still returned: deletion and later
+    /// recreation are changes the caller wants to observe.
+    ///
+    /// The paths are used for change detection only. They are never stored on an error, printed
+    /// by a [`fmt::Debug`] implementation, or published in a snapshot, because a path can name a
+    /// host or a user. A source whose content comes from somewhere a local file cannot describe
+    /// returns an empty list rather than a guess.
+    #[must_use]
+    fn watch_paths(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
 }
 
 impl<F> Source for F
@@ -213,5 +231,11 @@ impl ResolvedSource {
     /// Returns whatever the source reports; the builder attaches the registered name.
     pub(crate) fn load(&self) -> Result<Value, SourceError> {
         self.source.load()
+    }
+
+    /// Returns the files this source reads, for the reload feature's polling watcher.
+    #[cfg(feature = "reload")]
+    pub(crate) fn watch_paths(&self) -> Vec<PathBuf> {
+        self.source.watch_paths()
     }
 }

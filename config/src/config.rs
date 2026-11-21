@@ -26,6 +26,7 @@ const NO_ORIGIN: &str = "configuration";
 pub(crate) type Origins = BTreeMap<Vec<String>, Arc<str>>;
 
 /// One immutable merged value tree with per-node source attribution.
+#[derive(PartialEq)]
 pub(crate) struct Snapshot {
     pub(crate) value: Value,
     pub(crate) origin: Origins,
@@ -280,6 +281,48 @@ impl Builder {
     /// - [`Error::is_source_failure`] when a source cannot load, contains a non-finite number, or
     ///   returns a root that is not a map.
     pub fn build(self) -> Result<Config, Error> {
+        let (sources, delimiter) = self.prepare()?;
+        let roots = load_roots(&sources)?;
+        Ok(Config::root(
+            Arc::new(merge_roots(&sources, roots)),
+            delimiter,
+        ))
+    }
+
+    /// Builds a cloneable holder that can refresh the snapshot from the same sources.
+    ///
+    /// Requires the `reload` feature. The returned [`crate::Reload`] owns the resolved sources,
+    /// the current immutable snapshot, and the list of watched files. [`crate::Reload::refresh`]
+    /// loads every source again and publishes a new snapshot only when the merged value tree or
+    /// its provenance differs from the current one. A failed load leaves the previous snapshot in
+    /// place.
+    ///
+    /// The watched-file baseline is captured **before** the initial load completes. A change that
+    /// happens while the initial load is running is therefore seen by the next poll rather than
+    /// being mistaken for the baseline.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Builder::build`]. No holder is created when the initial load
+    /// fails.
+    #[cfg(feature = "reload")]
+    pub fn build_reloadable(self) -> Result<crate::Reload, Error> {
+        let (sources, delimiter) = self.prepare()?;
+        let watch_paths = collect_watch_paths(&sources);
+        let baseline = crate::reload::Fingerprints::capture(&watch_paths);
+        let roots = load_roots(&sources)?;
+        let snapshot = merge_roots(&sources, roots);
+        Ok(crate::Reload::new(
+            sources,
+            delimiter,
+            Arc::new(snapshot),
+            watch_paths,
+            baseline,
+        ))
+    }
+
+    /// Checks the delimiter and names, then applies the delimiter to every provider.
+    fn prepare(self) -> Result<(Vec<ResolvedSource>, char), Error> {
         check_delimiter(self.delimiter)?;
         check_names(&self.sources)?;
         let Self { sources, delimiter } = self;
@@ -287,37 +330,64 @@ impl Builder {
         // Resolve the delimiter before loading: a built-in provider's default key separator is the
         // builder's final delimiter, so registration order relative to `delimiter` cannot change
         // how its keys are split.
-        let sources: Vec<ResolvedSource> = sources
+        let sources = sources
             .into_iter()
             .map(|pending| pending.resolve(delimiter))
             .collect();
-
-        // Load and check every source before merging any of them. A source that fails therefore
-        // cannot leave a partially merged tree to reason about.
-        let mut roots = Vec::with_capacity(sources.len());
-        for source in &sources {
-            let value = source
-                .load()
-                .map_err(|error| Error::from_source(source.name.as_str(), error))?;
-            if !value.is_representable() {
-                return Err(Error::unrepresentable(source.name.as_str()));
-            }
-            let Value::Map(root) = value else {
-                return Err(Error::root_not_map(source.name.as_str()));
-            };
-            roots.push(root);
-        }
-
-        let mut snapshot = Snapshot {
-            value: Value::Map(BTreeMap::new()),
-            origin: BTreeMap::new(),
-        };
-        for (source, root) in sources.iter().zip(roots) {
-            let name: Arc<str> = Arc::from(source.name.as_str());
-            merge_root(&mut snapshot, root, &name);
-        }
-        Ok(Config::root(Arc::new(snapshot), delimiter))
+        Ok((sources, delimiter))
     }
+}
+
+/// Loads every source in registration order, before any value is merged.
+///
+/// A source that fails therefore cannot leave a partially merged tree to reason about.
+pub(crate) fn load_roots(
+    sources: &[ResolvedSource],
+) -> Result<Vec<BTreeMap<String, Value>>, Error> {
+    let mut roots = Vec::with_capacity(sources.len());
+    for source in sources {
+        let value = source
+            .load()
+            .map_err(|error| Error::from_source(source.name.as_str(), error))?;
+        if !value.is_representable() {
+            return Err(Error::unrepresentable(source.name.as_str()));
+        }
+        let Value::Map(root) = value else {
+            return Err(Error::root_not_map(source.name.as_str()));
+        };
+        roots.push(root);
+    }
+    Ok(roots)
+}
+
+/// Merges already loaded roots into one snapshot, recording provenance.
+pub(crate) fn merge_roots(
+    sources: &[ResolvedSource],
+    roots: Vec<BTreeMap<String, Value>>,
+) -> Snapshot {
+    let mut snapshot = Snapshot {
+        value: Value::Map(BTreeMap::new()),
+        origin: BTreeMap::new(),
+    };
+    for (source, root) in sources.iter().zip(roots) {
+        let name: Arc<str> = Arc::from(source.name.as_str());
+        merge_root(&mut snapshot, root, &name);
+    }
+    snapshot
+}
+
+/// The distinct files named by the registered sources, in registration order.
+#[cfg(feature = "reload")]
+fn collect_watch_paths(sources: &[ResolvedSource]) -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    for source in sources {
+        for path in source.watch_paths() {
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    paths
 }
 
 /// Rejects a delimiter outside the documented set before any source is loaded.

@@ -97,6 +97,10 @@ impl Source for JsonFile {
         }
         Ok(value)
     }
+
+    fn watch_paths(&self) -> Vec<PathBuf> {
+        vec![self.path.clone()]
+    }
 }
 
 /// Parses one RFC 8259 JSON document and keeps every number exact.

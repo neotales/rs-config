@@ -2,8 +2,9 @@
 
 This page states the behavior `neotales-config` 0.0.0-alpha.0 promises. The core is in-memory and
 caller-supplied sources. Process arguments, the process environment, a dotenv file, and six file
-formats are explicit, feature-gated providers. File watching, a reload holder, and vault resolution
-are not part of this release.
+formats are explicit, feature-gated providers. The optional `reload` feature adds a cloneable
+snapshot holder, manual refresh, change subscriptions, and an explicit polling watcher. Vault
+resolution is not part of this release.
 
 ## Sources
 
@@ -12,7 +13,11 @@ are not part of this release.
   format provider rejects a document whose root is not a map as `SourceError::Invalid`.
 - A source is loaded once per `Builder::build`, in registration order. `Config` never calls a
   source again. A format source reads its path on every `Source::load`, so loading it again sees a
-  replaced file; `Builder::build` performs exactly one load.
+  replaced file; `Builder::build` performs exactly one load. `Builder::build_reloadable` performs
+  one initial load and loads every source again on each `Reload::refresh`.
+- `Source::watch_paths` reports stable local files whose contents decide `Source::load`. Its default
+  is empty. Every file provider returns its configured path, including `DotenvFile`. Paths are used
+  only for change detection and never reach an error or a public `Debug` output.
 - A source reports failure with `SourceError`, which carries `Unavailable`, `Invalid`, or
   `Unrepresentable` and no message. The builder adds the registered source name and never forwards
   source text. `Unrepresentable` becomes `Error::is_unrepresentable`; the other two become a
@@ -108,8 +113,9 @@ Every format has its own constructor (`JsonFile::new`, `Json5File::new`, `JsoncF
 `TomlFile::new`, `YamlFile::new`, `IniFile::new`) and its own builder method. Nothing is inferred
 from a file extension, and no provider falls back to another format.
 
-A format source reads its path again on every load. There is no watcher and no holder in this
-release; reloading is the caller's decision, and a build always performs exactly one read.
+A format source reads its path again on every load, and reports that path through
+`Source::watch_paths`. A build always performs exactly one read; the `reload` feature is what
+rebuilds the snapshot from the same sources.
 
 File-format keys are literal and hierarchical exactly as the document wrote them. The builder's
 delimiter is not applied as a key separator: a dotted key in a document is one key, not a nested
@@ -185,6 +191,50 @@ The INI dialect is this crate's own:
 A later assignment to the same key wins. A repeated section header continues the existing section
 and later assignments merge into it; a root scalar and a section with the same name reject the
 document. Every value stays a string, including a numeric or boolean spelling.
+
+## Reload and watching (`reload`)
+
+The `reload` feature is code only: it adds no dependency and starts no thread by itself.
+
+- `Builder::build_reloadable` returns `Reload`, a cloneable holder. Cloning is one `Arc` reference
+  count; the sources, published snapshot, subscribers, and watch baseline are shared.
+- The holder captures the watched-file baseline **before** the initial load. A change made while
+  the initial load is running is seen by the next poll instead of being absorbed into the baseline.
+- `Reload::refresh` loads every source in registration order and validates every tree before
+  merging any of them. The merged value tree and its provenance are one immutable `Snapshot`, and
+  the new `Arc` is published in one write. A reader therefore never sees a new value with old
+  provenance, or the reverse.
+- A failed read, parse, validation, non-map root, or unrepresentable value leaves the previous
+  snapshot published. `RefreshOutcome::Failed` and `Reload::last_error` report the same sanitized
+  error the builder would return. The error never carries a value, a document, parser text, or a
+  path, and its source chain stays empty.
+- `Reload::refresh_if_changed` fingerprints the watched paths before the load. Fingerprints are a
+  digest of file contents, not a timestamp, so a replacement that preserves size or modification
+  time is still detected. Missing, unreadable, and recreated paths are distinct from a present
+  file, so deletion and recovery are observed. A change that produces byte-identical contents is
+  not a change, because the snapshot would be identical.
+- The observed fingerprint is recorded even when the load fails, so identical failed bytes are not
+  retried on every poll. A later content change retries, and a successful load clears the stored
+  error even when the merged tree equals the still-published snapshot.
+- Refreshes are serialized by one lock. Concurrent manual refreshes, a manual refresh racing a
+  poll, and overlapping polls run one at a time. A successful refresh that produces the same value
+  tree and provenance returns `Unchanged` and publishes and notifies nothing.
+- `Reload::subscribe` returns a `Subscription` with its own generation. Every subscriber observes
+  the newest snapshot independently; notifications coalesce, so a lagging subscriber sees the
+  latest change once rather than every intermediate one. Dropping a subscriber unregisters it.
+  When the last holder and watcher are gone, a receiver reports disconnection.
+- `Reload::start_watching` is the only call that creates a thread. It is explicit, takes a
+  non-zero interval, and requires at least one source that reports a path. `Watcher::stop` and
+  `Watcher::drop` set the stop flag, wake the thread, and join it. A failed poll records its error
+  and keeps polling.
+- Polling is not an OS notification API. Detection latency is up to the interval plus refresh
+  time. Every poll reads every watched file in full to fingerprint it, so cost follows total
+  watched size. A partially written file safely fails and is retried after the next content
+  change; an atomic rename is the recommended write pattern.
+- A published snapshot holds merged values in plaintext. Only the newest snapshot is held by the
+  holder, but an older snapshot lives while a `Config` clone references it. A failed load's
+  temporary tree is dropped before the outcome returns. Fingerprints store a digest, never file
+  bytes. Do not log a `Config` tree that contains a secret.
 
 ## Merge
 
@@ -300,3 +350,12 @@ text. `Error::source()` is always `None`, so no nested error can reintroduce tex
 | Unrepresentable numbers are rejected, never rounded | `tests/formats.rs`, `src/source/*.rs` |
 | File path, document text, and parser text never reach an error | `tests/format_security.rs` |
 | TOML date-time is typed, not a string | `tests/formats.rs`, `src/source/toml_file.rs` |
+| Manual refresh, no-change, and old-snapshot independence | `tests/reload.rs` |
+| A provenance-only change still publishes | `tests/reload.rs` |
+| Independent coalesced subscriptions and disconnection | `tests/reload.rs` |
+| Serialized concurrent refreshes | `tests/reload.rs` |
+| Baseline before the initial load | `tests/reload.rs` |
+| Failed reload keeps value and provenance, then recovers | `tests/reload.rs` |
+| Deletion, recreation, and same-size atomic replacement | `tests/reload.rs` |
+| Explicit watcher publication, failure recovery, and shutdown | `tests/reload.rs` |
+| Dotenv path is watchable | `tests/reload.rs` |
