@@ -1,0 +1,99 @@
+# Contracts
+
+This page states the behavior `neotales-config` 0.0.0-alpha.0 promises. It covers the core only:
+in-memory and caller-supplied sources. File formats, the process environment, dotenv, arguments,
+watching, reload, and vault resolution are not part of this release.
+
+## Sources
+
+- A source returns a [`Value`](../src/value.rs) whose root is a `Value::Map`. Any other root fails
+  `Builder::build` with `Error::is_root_not_map`.
+- A source is loaded exactly once, at `Builder::build`, in registration order. `Config` never
+  calls a source again.
+- A source reports failure with `SourceError`, which carries `Unavailable` or `Invalid` and no
+  message. The builder adds the registered source name and never forwards source text.
+- Source names are unique and non-empty. A repeated name fails with
+  `Error::is_duplicate_source`; an empty name fails with `Error::is_empty_source_name`. Both are
+  checked before any source is loaded.
+- A published tree contains only finite floats. A non-finite float fails with
+  `Error::is_unrepresentable`.
+
+## Merge
+
+Sources register in ascending precedence. For every key:
+
+- Two maps merge recursively.
+- A map and a scalar, array, or null replace one another.
+- Two arrays replace; they never concatenate.
+- Two scalars replace, including two scalars of different types.
+
+There are no profiles and no alternative strategies.
+
+Provenance follows the same walk:
+
+- Every node records the source that introduced or last replaced it.
+- A later source that merges children into an existing map keeps the earlier source on the parent
+  map and on untouched children.
+- A replacement owns the whole new subtree. Provenance for every node below the replaced path is
+  dropped before the new subtree is recorded, so a removed key never answers with a stale source.
+- Provenance identity is a sequence of path components, not a joined string. A key that contains a
+  delimiter therefore has its own identity and never shares an entry with a nested path of the same
+  spelling.
+
+## Paths
+
+A path is one or more non-empty components separated by the builder's delimiter. The default
+delimiter is `.`. Invalid forms are rejected before lookup:
+
+- the empty path,
+- a leading delimiter (`".a"`),
+- a trailing delimiter (`"a."`),
+- two adjacent delimiters (`"a..b"`).
+
+An invalid path returns `Error::is_invalid_path`. It is never treated as an absent key.
+
+A custom delimiter only changes how a supplied path is split. With `:`, `http:port` is the nested
+path `http` then `port`, while `http.port` is one component named `http.port`. Under the default
+`.`, the latter spelling is the nested path, and a literal key of that name is not selected by it.
+
+## Typed reads
+
+- `has` reports presence without deserializing. Null, false, zero, and empty are present. It
+  returns `Result<bool, Error>` so an invalid path is an error rather than a false answer.
+- `get` fails with `Error::is_missing` for an absent path and `Error::is_type_mismatch` for a
+  present value of the wrong shape.
+- `get_or` returns its default only for absence. A present wrong type is still a mismatch.
+- `load` deserializes the focused subtree.
+- `value` returns the focused node without deserializing it.
+- Numeric reads are exact. An integer reads as an unsigned type only when it is in range, and as a
+  float only when the float holds the same number. A float reads as an integer only when it has no
+  fraction and is in range. A string is never parsed as a number.
+- A deserialization error carries a fixed shape label. A caller-supplied serde message, a custom
+  expectation, and a value are all discarded.
+
+## Immutability and cost
+
+`Config` holds an `Arc` to an immutable snapshot and an `Arc` cursor. Cloning increments two
+reference counts and copies no tree. `child` validates, extends the cursor, and shares the same
+snapshot. A build allocates one snapshot; a failed build returns no `Config`.
+
+## Errors
+
+`Error` names a path, a source name, a fixed shape label, or a fixed reason. It never stores or
+prints a value, a secret, a connection string, a file body, or foreign error text.
+`Error::source()` is always `None`, so no nested error can reintroduce text.
+
+## Test map
+
+| Contract | Test |
+| --- | --- |
+| Precedence, nested merge, replacement | `tests/sources.rs` |
+| Provenance and stale-entry removal | `tests/sources.rs` |
+| Unique and non-empty source names | `tests/sources.rs` |
+| Map root enforcement | `tests/sources.rs` |
+| Invalid path forms and custom delimiter | `tests/paths.rs` |
+| Literal dotted key versus nested path | `tests/paths.rs`, `tests/typed.rs` |
+| Presence, absence, mismatch, `get_or` | `tests/typed.rs` |
+| Exact numbers and no string coercion | `tests/typed.rs`, `src/de.rs` |
+| Sanitized errors | `tests/errors.rs` |
+| Snapshot clone and value-free `Debug` | `tests/immutability.rs` |

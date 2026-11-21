@@ -1,0 +1,474 @@
+//! The builder, the immutable snapshot, and the typed read API.
+
+use std::{
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
+    fmt,
+    sync::Arc,
+};
+
+use serde::de::DeserializeOwned;
+
+use crate::{
+    de::Node,
+    error::Error,
+    source::{PendingSource, Source},
+    value::Value,
+};
+
+/// The source name reported for a node that no source wrote. Only the root has no source, and the
+/// root is not addressable by a path, so this is not observable through [`Config::origin`].
+const NO_ORIGIN: &str = "configuration";
+
+/// The provenance of every addressable node, keyed by its path components.
+pub(crate) type Origins = BTreeMap<Vec<String>, Arc<str>>;
+
+/// One immutable merged value tree with per-node source attribution.
+pub(crate) struct Snapshot {
+    pub(crate) value: Value,
+    pub(crate) origin: Origins,
+}
+
+/// Builds one process-local configuration snapshot.
+///
+/// Each registration method adds one source. Registration order is precedence: the later source
+/// wins per key, nested maps merge, and any other value replaces. There are no profiles and no
+/// implicit discovery.
+///
+/// # Secrets
+///
+/// [`fmt::Debug`] reports the number of sources and the delimiter, not their contents.
+pub struct Builder {
+    sources: Vec<PendingSource>,
+    delimiter: char,
+}
+
+impl Default for Builder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[allow(
+    clippy::missing_fields_in_debug,
+    reason = "a source list is reported by size, never by contents"
+)]
+impl fmt::Debug for Builder {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        output
+            .debug_struct("Builder")
+            .field("sources", &self.sources.len())
+            .field("delimiter", &self.delimiter)
+            .finish()
+    }
+}
+
+impl Builder {
+    /// Starts an empty builder with `.` as its path delimiter.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            sources: Vec::new(),
+            delimiter: '.',
+        }
+    }
+
+    /// Selects the delimiter for string paths.
+    ///
+    /// The delimiter separates components for [`Config::child`], [`Config::has`],
+    /// [`Config::get`], [`Config::get_or`], and [`Config::origin`]. With `:`, `http:port` and
+    /// `http.port` are different paths: the first is two components and the second is one
+    /// component whose name happens to contain a dot.
+    ///
+    /// A source key that contains the delimiter, or is empty, is not addressable through a
+    /// string path, because the path splits on the delimiter and rejects an empty component. It
+    /// stays in the tree and is readable through [`Config::load`] or [`Config::value`].
+    ///
+    /// With the default `.`, the path `http.port` always means the nested map `http` then `port`.
+    /// A top-level key whose name is literally `http.port` is not selected by it, and a missing
+    /// nested map is [`Error::is_missing`], not the literal key.
+    #[must_use]
+    pub const fn delimiter(mut self, delimiter: char) -> Self {
+        self.delimiter = delimiter;
+        self
+    }
+
+    /// Registers an in-memory source.
+    ///
+    /// `value` must be a [`Value::Map`]; any other root fails [`Builder::build`] with
+    /// [`Error::is_root_not_map`].
+    #[must_use]
+    pub fn memory(self, name: impl Into<String>, value: Value) -> Self {
+        self.source(name, move || Ok(value.clone()))
+    }
+
+    /// Registers a caller-supplied source in precedence order.
+    ///
+    /// The source returns a value tree whose root is a [`Value::Map`], or a
+    /// [`crate::SourceError`]. Its error text is not forwarded, so a provider in another crate
+    /// cannot leak a value through this one. A closure of type
+    /// `Fn() -> Result<Value, SourceError>` implements [`Source`].
+    ///
+    /// A source is loaded once, at build. It is not called again for the life of the snapshot.
+    #[must_use]
+    pub fn source(mut self, name: impl Into<String>, source: impl Source + 'static) -> Self {
+        self.sources.push(PendingSource {
+            name: name.into(),
+            source: Box::new(source),
+        });
+        self
+    }
+
+    /// Builds the fixed immutable snapshot.
+    ///
+    /// Every source is loaded in registration order before any value is merged. A source may
+    /// therefore fail without a partial result being observable.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::is_empty_source_name`] when a source has an empty name.
+    /// - [`Error::is_duplicate_source`] when two sources share a name.
+    /// - [`Error::is_source_failure`] when a source cannot load, contains a non-finite number, or
+    ///   returns a root that is not a map.
+    pub fn build(self) -> Result<Config, Error> {
+        check_names(&self.sources)?;
+        let Self { sources, delimiter } = self;
+
+        // Load and check every source before merging any of them. A source that fails therefore
+        // cannot leave a partially merged tree to reason about.
+        let mut roots = Vec::with_capacity(sources.len());
+        for pending in &sources {
+            let value = pending
+                .load()
+                .map_err(|error| Error::from_source(pending.name.as_str(), error))?;
+            if !value.is_representable() {
+                return Err(Error::unrepresentable(pending.name.as_str()));
+            }
+            let Value::Map(root) = value else {
+                return Err(Error::root_not_map(pending.name.as_str()));
+            };
+            roots.push(root);
+        }
+
+        let mut snapshot = Snapshot {
+            value: Value::Map(BTreeMap::new()),
+            origin: BTreeMap::new(),
+        };
+        for (pending, root) in sources.iter().zip(roots) {
+            let source: Arc<str> = Arc::from(pending.name.as_str());
+            merge_root(&mut snapshot, root, &source);
+        }
+        Ok(Config::root(Arc::new(snapshot), delimiter))
+    }
+}
+
+/// Rejects an empty or repeated source name before any source is loaded.
+fn check_names(sources: &[PendingSource]) -> Result<(), Error> {
+    let mut seen = BTreeSet::new();
+    for source in sources {
+        if source.name.is_empty() {
+            return Err(Error::empty_source_name());
+        }
+        if !seen.insert(source.name.as_str()) {
+            return Err(Error::duplicate_source(&source.name));
+        }
+    }
+    Ok(())
+}
+
+/// Merges one source root map into the snapshot, recording provenance.
+fn merge_root(snapshot: &mut Snapshot, later: BTreeMap<String, Value>, source: &Arc<str>) {
+    let Value::Map(base) = &mut snapshot.value else {
+        return;
+    };
+    merge_map(base, &mut snapshot.origin, later, source, &mut Vec::new());
+}
+
+/// Merges map entries recursively. `path` is the path of `base` itself.
+fn merge_map(
+    base: &mut BTreeMap<String, Value>,
+    origin: &mut Origins,
+    later: BTreeMap<String, Value>,
+    source: &Arc<str>,
+    path: &mut Vec<String>,
+) {
+    for (key, value) in later {
+        path.push(key.clone());
+        match (base.entry(key), value) {
+            (Entry::Occupied(mut entry), Value::Map(later_map)) => {
+                if let Value::Map(base_map) = entry.get_mut() {
+                    merge_map(base_map, origin, later_map, source, path);
+                } else {
+                    forget_below(origin, path);
+                    let value = Value::Map(later_map);
+                    record_tree(&value, origin, source, path);
+                    entry.insert(value);
+                }
+            }
+            (Entry::Occupied(mut entry), value) => {
+                forget_below(origin, path);
+                record_tree(&value, origin, source, path);
+                entry.insert(value);
+            }
+            (Entry::Vacant(entry), value) => {
+                record_tree(&value, origin, source, path);
+                entry.insert(value);
+            }
+        }
+        path.pop();
+    }
+}
+
+/// Drops attribution for every node below `path`, which a replacement made stale.
+fn forget_below(origin: &mut Origins, path: &[String]) {
+    let stale: Vec<Vec<String>> = origin
+        .keys()
+        .filter(|key| key.len() > path.len() && key.starts_with(path))
+        .cloned()
+        .collect();
+    for key in stale {
+        origin.remove(&key);
+    }
+}
+
+/// Records `source` for `value` and every node below it.
+fn record_tree(value: &Value, origin: &mut Origins, source: &Arc<str>, path: &mut Vec<String>) {
+    if !path.is_empty() {
+        origin.insert(path.clone(), Arc::clone(source));
+    }
+    if let Value::Map(map) = value {
+        for (key, child) in map {
+            path.push(key.clone());
+            record_tree(child, origin, source, path);
+            path.pop();
+        }
+    }
+}
+
+/// Joins path components for display.
+fn join(cursor: &[String], delimiter: char) -> String {
+    let mut output = String::new();
+    for (index, component) in cursor.iter().enumerate() {
+        if index > 0 {
+            output.push(delimiter);
+        }
+        output.push_str(component);
+    }
+    output
+}
+
+/// An immutable configuration snapshot, focused at a path.
+///
+/// Cloning is two `Arc` reference-count increments: one for the snapshot and one for the cursor.
+/// The value tree is never copied, and the snapshot never changes.
+#[derive(Clone)]
+pub struct Config {
+    snapshot: Arc<Snapshot>,
+    cursor: Arc<[String]>,
+    delimiter: char,
+}
+
+#[allow(
+    clippy::missing_fields_in_debug,
+    reason = "a snapshot is reported by path and type, never by value"
+)]
+impl fmt::Debug for Config {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        output
+            .debug_struct("Config")
+            .field("path", &join(&self.cursor, self.delimiter))
+            .field("type", &self.focused().map(Value::type_name))
+            .finish()
+    }
+}
+
+impl Config {
+    pub(crate) fn root(snapshot: Arc<Snapshot>, delimiter: char) -> Self {
+        Self {
+            snapshot,
+            cursor: Arc::from(Vec::new()),
+            delimiter,
+        }
+    }
+
+    /// Focuses a child of this snapshot. A missing child is an error, not an empty document.
+    ///
+    /// The result is a cursor over the same snapshot; no part of the tree is cloned.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::is_invalid_path`] when `path` is empty or has an empty component, and
+    /// [`Error::is_missing`] when the path is absent.
+    pub fn child(&self, path: &str) -> Result<Self, Error> {
+        self.validate_path(path)?;
+        let mut cursor: Vec<String> = self.cursor.to_vec();
+        cursor.extend(path.split(self.delimiter).map(str::to_owned));
+        if self
+            .snapshot
+            .value
+            .descend(cursor.iter().map(String::as_str))
+            .is_none()
+        {
+            return Err(Error::missing(join(&cursor, self.delimiter)));
+        }
+        Ok(Self {
+            snapshot: Arc::clone(&self.snapshot),
+            cursor: cursor.into(),
+            delimiter: self.delimiter,
+        })
+    }
+
+    /// Tests whether a path is present, without deserializing it.
+    ///
+    /// Null, false, zero, and empty are present.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::is_invalid_path`] when `path` is empty or has an empty component.
+    pub fn has(&self, path: &str) -> Result<bool, Error> {
+        self.validate_path(path)?;
+        Ok(self.resolve(path).is_some())
+    }
+
+    /// Deserializes a present value.
+    ///
+    /// A lossless numeric fit is accepted: an integer that is non-negative reads as `u64`, an
+    /// exact integer reads as `f64`, and a finite float with no fraction reads as an integer in
+    /// range. A string is never parsed as a number.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::is_invalid_path`] when `path` is empty or has an empty component,
+    /// [`Error::is_missing`] when the path is absent, and [`Error::is_type_mismatch`] when the
+    /// value cannot be read as `T`. The mismatch names the expected shape, never the value and
+    /// never a caller-supplied serde message or expectation.
+    pub fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, Error> {
+        self.validate_path(path)?;
+        let Some(value) = self.resolve(path) else {
+            return Err(Error::missing(self.full_path(path)));
+        };
+        T::deserialize(Node::Value(value)).map_err(|error| {
+            Error::type_mismatch(
+                self.full_path(path),
+                self.origin_for(path),
+                error.expected(),
+            )
+        })
+    }
+
+    /// Returns `default` only when the path is absent.
+    ///
+    /// A present null, false, zero, or empty value is returned as-is, and a present value of the
+    /// wrong type is still an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::is_invalid_path`] when `path` is empty or has an empty component, and
+    /// [`Error::is_type_mismatch`] when the value is present and cannot be read as `T`.
+    pub fn get_or<T: DeserializeOwned>(&self, path: &str, default: T) -> Result<T, Error> {
+        self.validate_path(path)?;
+        if self.resolve(path).is_some() {
+            self.get(path)
+        } else {
+            Ok(default)
+        }
+    }
+
+    /// Deserializes the focused document.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::is_type_mismatch`] when the document is not shaped like `T`.
+    pub fn load<T: DeserializeOwned>(&self) -> Result<T, Error> {
+        let Some(value) = self.focused() else {
+            return Err(Error::missing(join(&self.cursor, self.delimiter)));
+        };
+        T::deserialize(Node::Value(value)).map_err(|error| {
+            Error::type_mismatch(
+                join(&self.cursor, self.delimiter),
+                self.origin_of_cursor(),
+                error.expected(),
+            )
+        })
+    }
+
+    /// Returns the focused node without deserializing it.
+    ///
+    /// `None` only when the focused path is absent, which a `Config` obtained from
+    /// [`Self::child`] or from [`Builder::build`] cannot be.
+    #[must_use]
+    pub fn value(&self) -> Option<&Value> {
+        self.focused()
+    }
+
+    /// Returns the source that introduced or last replaced the node at `path`.
+    ///
+    /// A map created by an earlier source keeps that source when a later source only merges
+    /// children into it. A later source that replaces a map with a scalar, or a scalar with a map,
+    /// owns the whole subtree, and the stale provenance below it is dropped.
+    ///
+    /// A literal key that contains the delimiter has its own identity. It never answers for a
+    /// nested path of the same spelling, because the path split decides which node is meant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::is_invalid_path`] when `path` is empty or has an empty component, and
+    /// [`Error::is_missing`] when the path is absent.
+    pub fn origin(&self, path: &str) -> Result<&str, Error> {
+        self.validate_path(path)?;
+        if self.resolve(path).is_none() {
+            return Err(Error::missing(self.full_path(path)));
+        }
+        Ok(self.origin_for(path).unwrap_or(NO_ORIGIN))
+    }
+
+    /// Rejects an empty path or an empty component.
+    fn validate_path(&self, path: &str) -> Result<(), Error> {
+        if path.is_empty() || path.split(self.delimiter).any(str::is_empty) {
+            return Err(Error::invalid_path(path));
+        }
+        Ok(())
+    }
+
+    /// Resolves a path that [`Self::validate_path`] already accepted.
+    fn resolve(&self, path: &str) -> Option<&Value> {
+        self.snapshot.value.descend(
+            self.cursor
+                .iter()
+                .map(String::as_str)
+                .chain(path.split(self.delimiter)),
+        )
+    }
+
+    fn focused(&self) -> Option<&Value> {
+        self.snapshot
+            .value
+            .descend(self.cursor.iter().map(String::as_str))
+    }
+
+    /// Returns the source for a path that [`Self::validate_path`] already accepted.
+    fn origin_for(&self, path: &str) -> Option<&str> {
+        let mut components: Vec<String> = self.cursor.to_vec();
+        components.extend(path.split(self.delimiter).map(str::to_owned));
+        self.snapshot
+            .origin
+            .get(components.as_slice())
+            .map(|source| &**source)
+    }
+
+    fn origin_of_cursor(&self) -> Option<&str> {
+        self.snapshot
+            .origin
+            .get(self.cursor.as_ref())
+            .map(|source| &**source)
+    }
+
+    /// The full path of `path` relative to this cursor, for an error.
+    fn full_path(&self, path: &str) -> String {
+        let mut output = join(&self.cursor, self.delimiter);
+        if !output.is_empty() {
+            output.push(self.delimiter);
+        }
+        output.push_str(path);
+        output
+    }
+}
