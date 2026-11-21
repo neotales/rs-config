@@ -98,10 +98,11 @@ jobs:
       # The release workflow runs this same script immediately before an upload.
       # Here it runs with the failure injection: a gate that has never been seen
       # rejecting anything is not a gate. The injection stages the registry
-      # without the core and with a drifted core version, and checks that
-      # packaging the provider fails against both, then exercises the three
-      # verdicts the publish job's checksum decision can return. Nothing is
-      # uploaded and no token is read.
+      # without the core and with a drifted core version, rejects a provider or
+      # core published at different bytes or matching-but-yanked with zero
+      # uploads, proves both packages are byte-stable, compares the publish
+      # path's artifact with the gate artifact, and runs the gate from outside
+      # the repository root. Nothing is uploaded and no token is read.
       - name: Package the group against a staged registry
         run: python3 eng/release/stage_gate.py gate --self-test
 
