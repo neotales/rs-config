@@ -405,10 +405,12 @@ different repository setup, not a flag.
 `release.yml`, which no longer requests a token; enabling the restriction would
 break manual publishing without replacing it with anything proven.
 
-`cargo package -p neotales-config` includes every tracked file under `config/`,
-and `cargo package -p neotales-config-keepass` includes every tracked file under
-`keepass/`, so each crate README, its licence, its docs, and its tests ship
-inside its published crate. The root `RELEASE.md`, `.github/`, and the workspace
+Each package excludes its `benches/` directory, so
+`cargo package -p neotales-config` includes every tracked file under `config/`
+except that directory, and `cargo package -p neotales-config-keepass` does the
+same under `keepass/`. Each crate README, its licence, its docs, and its tests
+still ship inside its published crate; the benchmark sources and their generated
+fixtures do not. The root `RELEASE.md`, `.github/`, and the workspace
 manifest stay out of both packages: they belong to the repository, not to a
 crate. The README style guide lives at `~/work/rs/README.STYLE.md` and is not
 part of a crate.
