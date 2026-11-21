@@ -130,12 +130,51 @@ impl Builder {
         self.source(name, move || Ok(value.clone()))
     }
 
+    /// Registers a process argument source. Requires the `args` feature.
+    ///
+    /// The provider receives the builder's delimiter as its default key separator, so
+    /// `--http.port=8080` maps to `http` then `port` under the default `.` and to one literal key
+    /// under a custom delimiter unless [`crate::Arguments::separator`] is set explicitly. See
+    /// [`crate::Arguments`] for the accepted switches and errors.
+    #[cfg(feature = "args")]
+    #[must_use]
+    pub fn arguments(self, name: impl Into<String>, arguments: crate::Arguments) -> Self {
+        let delimiter = self.delimiter;
+        self.source(name, arguments.delimiter(delimiter))
+    }
+
+    /// Registers a process environment source. Requires the `environment` feature.
+    ///
+    /// The provider receives the builder's delimiter as its default key separator. See
+    /// [`crate::Environment`] for prefix, case, collision, and error behavior.
+    #[cfg(feature = "environment")]
+    #[must_use]
+    pub fn environment(self, name: impl Into<String>, environment: crate::Environment) -> Self {
+        let delimiter = self.delimiter;
+        self.source(name, environment.delimiter(delimiter))
+    }
+
+    /// Registers a dotenv file source. Requires the `dotenv` feature.
+    ///
+    /// The provider receives the builder's delimiter as its default key separator. The file is
+    /// read at build and the process environment is never changed. See [`crate::DotenvFile`].
+    #[cfg(feature = "dotenv")]
+    #[must_use]
+    pub fn dotenv_file(self, name: impl Into<String>, file: crate::DotenvFile) -> Self {
+        let delimiter = self.delimiter;
+        self.source(name, file.delimiter(delimiter))
+    }
+
     /// Registers a caller-supplied source in precedence order.
     ///
     /// The source returns a value tree whose root is a [`Value::Map`], or a
     /// [`crate::SourceError`]. Its error text is not forwarded, so a provider in another crate
     /// cannot leak a value through this one. A closure of type
     /// `Fn() -> Result<Value, SourceError>` implements [`Source`].
+    ///
+    /// A provider registered here is used as-is. Unlike the dedicated provider methods, this
+    /// method cannot pass the builder's delimiter to it, so the provider keeps `.` as its default
+    /// key separator unless it was configured explicitly.
     ///
     /// A source is loaded once, at build. It is not called again for the life of the snapshot.
     #[must_use]

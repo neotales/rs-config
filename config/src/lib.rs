@@ -26,9 +26,23 @@
 //!   replaced a node. Replacing a subtree drops the provenance below it. A type mismatch names
 //!   the source of the failing leaf, not the map that contains it.
 //!
-//! This release has no file, environment, argument, dotenv, reload, or vault provider. The root
-//! contract is the whole provider surface: a caller supplies a [`Value`] map or implements
-//! [`Source`].
+//! # Providers
+//!
+//! The core is memory-only: a caller supplies a [`Value`] map or implements [`Source`]. Process
+//! arguments, the process environment, and a dotenv file are opt-in sources, each behind its own
+//! feature and each registered explicitly:
+//!
+//! | Feature | Provider | Dependency |
+//! | --- | --- | --- |
+//! | `args` | `Arguments` | none |
+//! | `environment` | `Environment` | none |
+//! | `dotenv` | `DotenvFile` | `neotales-dotenv` |
+//!
+//! No feature is on by default. A provider value stays a string unless it is an argv boolean, and
+//! no provider writes to the process environment. The dedicated builder methods pass the
+//! builder's delimiter to the provider as its default key separator.
+//!
+//! There is no file-format, reload, vault, or remote provider in this release.
 //!
 //! # Example
 //!
@@ -67,3 +81,10 @@ pub use self::config::{Builder, Config};
 pub use self::error::{Error, SourceError, SourceErrorKind};
 pub use self::source::Source;
 pub use self::value::Value;
+
+#[cfg(feature = "args")]
+pub use self::source::Arguments;
+#[cfg(feature = "dotenv")]
+pub use self::source::DotenvFile;
+#[cfg(feature = "environment")]
+pub use self::source::{Case, Environment};

@@ -1,8 +1,9 @@
 # Contracts
 
-This page states the behavior `neotales-config` 0.0.0-alpha.0 promises. It covers the core only:
-in-memory and caller-supplied sources. File formats, the process environment, dotenv, arguments,
-watching, reload, and vault resolution are not part of this release.
+This page states the behavior `neotales-config` 0.0.0-alpha.0 promises. The core is in-memory and
+caller-supplied sources. Process arguments, the process environment, and a dotenv file are
+explicit, feature-gated providers. File formats, watching, reload, and vault resolution are not
+part of this release.
 
 ## Sources
 
@@ -17,6 +18,76 @@ watching, reload, and vault resolution are not part of this release.
   checked before any source is loaded.
 - A published tree contains only finite floats. A non-finite float fails with
   `Error::is_unrepresentable`.
+
+## Providers
+
+Each provider is opt-in and is a normal `Source`:
+
+| Feature | Source | External dependency |
+| --- | --- | --- |
+| `args` | `Arguments` | none |
+| `environment` | `Environment` | none |
+| `dotenv` | `DotenvFile` | `neotales-dotenv` |
+
+No provider is compiled into the default build. `dotenv` is the only one with an optional
+dependency; `cargo tree --no-default-features` shows no parser.
+
+### Key mapping
+
+All three providers map a name to nested maps through the same rules:
+
+- The prefix is removed first. An empty prefix selects every name; a name that equals the prefix
+  has an empty remainder and is invalid.
+- The remainder is split on the explicit separator. With no explicit separator, the builder's
+  delimiter is the separator. `flat()` disables splitting and keeps the remainder as one
+  component.
+- Every component must be non-empty. An empty separator is invalid.
+- The provider builder methods pass the builder's delimiter to the provider. Registering a
+  provider through `Builder::source` does not; that path keeps `.` unless the provider has an
+  explicit separator or `flat()`.
+
+### Values and collisions
+
+- Environment and dotenv values stay strings. A numeric or boolean spelling is never parsed.
+- Arguments values are strings for `--key=value` and booleans for `--key` and `--no-key`.
+- A repeated scalar path keeps the later entry: argv order for `Arguments`, file order for
+  `DotenvFile`, and original-name order for `Environment` (selected names are sorted first, so a
+  case-fold collision resolves the same way whatever order the environment returned).
+- A path that would have to be both a scalar and a map rejects the source. It is never resolved by
+  iteration order.
+- A non-Unicode environment name or value, a non-Unicode argv token, and a non-UTF-8 dotenv file
+  reject the source.
+- A dotenv line that is not an assignment rejects the whole file; a later assignment to the same
+  key wins.
+
+### Arguments
+
+Accepted tokens are exactly:
+
+- `--key=value`: a string, possibly empty and possibly containing `=` or spaces.
+- `--key`: boolean `true`.
+- `--no-key`: boolean `false`; the `no-` form applies only without `=`.
+
+Every other token is invalid: a positional, a short switch, a bare `-`, the empty token, `--`, an
+empty key, an empty path component, and a non-Unicode token. There is no `--` terminator and no
+separate value token. `Arguments::from_process` skips the program path; `Arguments::new` takes the
+arguments only. Neither mutates the process environment or argv.
+
+### Process environment
+
+`Environment::process` reads `std::env::vars_os()` once, at build. `Environment::from_pairs`
+supplies a fixed set instead. The provider never calls `set_var`, `remove_var`, or any other
+mutation. A prefix and a `Case` policy are explicit; there is no implicit discovery and no
+automatic uppercase or lowercase.
+
+### Dotenv
+
+`DotenvFile` reads one caller-supplied path once, at build, with `neotales-dotenv`. `export`,
+unquoted, single-quoted, double-quoted, and backtick values are accepted. A line whose first
+non-whitespace character is `#` is a comment; an unquoted `#` ends a value and starts an inline
+comment, while a `#` inside a quoted value stays literal. There is no interpolation and no
+environment mutation. A read failure is `SourceError::Unavailable`; an invalid document, invalid
+UTF-8, an empty key, or a mapping conflict is `SourceError::Invalid`.
 
 ## Merge
 
@@ -118,3 +189,7 @@ text. `Error::source()` is always `None`, so no nested error can reintroduce tex
 | Leaf attribution on a nested mismatch | `tests/typed.rs`, `src/de.rs` |
 | Sanitized errors | `tests/errors.rs`, `tests/delimiters.rs` |
 | Snapshot clone and value-free `Debug` | `tests/immutability.rs` |
+| Core with every provider feature off | `tests/providers_off.rs` |
+| Argument switches, collisions, and errors | `tests/arguments.rs` |
+| Environment mapping, case, and collisions | `tests/environment.rs` |
+| Dotenv parsing, mapping, and errors | `tests/dotenv.rs` |

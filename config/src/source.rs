@@ -1,8 +1,24 @@
-//! The source port and the source registration record.
+//! The source port, the source registration record, and the opt-in providers.
 
 use std::fmt;
 
 use crate::{error::SourceError, value::Value};
+
+#[cfg(feature = "args")]
+mod arguments;
+#[cfg(feature = "dotenv")]
+mod dotenv_file;
+#[cfg(feature = "environment")]
+mod environment;
+#[cfg(any(feature = "args", feature = "environment", feature = "dotenv"))]
+mod keys;
+
+#[cfg(feature = "args")]
+pub use self::arguments::Arguments;
+#[cfg(feature = "dotenv")]
+pub use self::dotenv_file::DotenvFile;
+#[cfg(feature = "environment")]
+pub use self::environment::{Case, Environment};
 
 /// A caller-supplied configuration source.
 ///

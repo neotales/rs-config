@@ -12,12 +12,18 @@ keywords = ["config", "configuration", "settings", "precedence", "merge"]
 categories = ["config"]
 
 [features]
-# The core has no optional provider and no optional dependency. A format
-# parser, the environment, dotenv, arguments and watching are separate work.
+# The core stays memory-only. Every provider is opt-in, so a build that reads
+# only in-memory values compiles no provider and no optional dependency.
+# `dotenv` is the only provider that needs a dependency; `args` and
+# `environment` add code, not a crate.
 default = []
+args = []
+environment = []
+dotenv = ["dep:neotales-dotenv"]
 
 [dependencies]
 serde = { version = "1.0", default-features = false, features = ["std"] }
+neotales-dotenv = { version = "0.0.0-alpha.1", optional = true }
 
 [dev-dependencies]
 serde = { version = "1.0", features = ["derive"] }
