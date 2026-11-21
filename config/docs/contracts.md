@@ -1,18 +1,22 @@
 # Contracts
 
 This page states the behavior `neotales-config` 0.0.0-alpha.0 promises. The core is in-memory and
-caller-supplied sources. Process arguments, the process environment, and a dotenv file are
-explicit, feature-gated providers. File formats, watching, reload, and vault resolution are not
-part of this release.
+caller-supplied sources. Process arguments, the process environment, a dotenv file, and six file
+formats are explicit, feature-gated providers. File watching, a reload holder, and vault resolution
+are not part of this release.
 
 ## Sources
 
-- A source returns a [`Value`](../src/value.rs) whose root is a `Value::Map`. Any other root fails
-  `Builder::build` with `Error::is_root_not_map`.
-- A source is loaded exactly once, at `Builder::build`, in registration order. `Config` never
-  calls a source again.
-- A source reports failure with `SourceError`, which carries `Unavailable` or `Invalid` and no
-  message. The builder adds the registered source name and never forwards source text.
+- A source returns a [`Value`](../src/value.rs) whose root is a `Value::Map`. A caller-supplied
+  source that returns any other root fails `Builder::build` with `Error::is_root_not_map`. A
+  format provider rejects a document whose root is not a map as `SourceError::Invalid`.
+- A source is loaded once per `Builder::build`, in registration order. `Config` never calls a
+  source again. A format source reads its path on every `Source::load`, so loading it again sees a
+  replaced file; `Builder::build` performs exactly one load.
+- A source reports failure with `SourceError`, which carries `Unavailable`, `Invalid`, or
+  `Unrepresentable` and no message. The builder adds the registered source name and never forwards
+  source text. `Unrepresentable` becomes `Error::is_unrepresentable`; the other two become a
+  source failure with the same kind.
 - Source names are unique and non-empty. A repeated name fails with
   `Error::is_duplicate_source`; an empty name fails with `Error::is_empty_source_name`. Both are
   checked before any source is loaded.
@@ -28,13 +32,19 @@ Each provider is opt-in and is a normal `Source`:
 | `args` | `Arguments` | none |
 | `environment` | `Environment` | none |
 | `dotenv` | `DotenvFile` | `neotales-dotenv` |
+| `json` | `JsonFile` | `serde_json` |
+| `json5` | `Json5File` | `json5` |
+| `jsonc` | `JsoncFile` | `jsonc-parser` |
+| `toml` | `TomlFile` | `toml` |
+| `yaml` | `YamlFile` | `saphyr`, `saphyr-parser` |
+| `ini` | `IniFile` | none |
 
-No provider is compiled into the default build. `dotenv` is the only one with an optional
-dependency; `cargo tree --no-default-features` shows no parser.
+No provider is compiled into the default build. Every parser is an optional dependency of exactly
+one feature; `cargo tree --no-default-features` shows no parser.
 
 ### Key mapping
 
-All three providers map a name to nested maps through the same rules:
+`Arguments`, `Environment`, and `DotenvFile` map a name to nested maps through the same rules:
 
 - The prefix is removed first. An empty prefix selects every name; a name that equals the prefix
   has an empty remainder and is invalid.
@@ -42,9 +52,10 @@ All three providers map a name to nested maps through the same rules:
   delimiter is the separator. `flat()` disables splitting and keeps the remainder as one
   component.
 - Every component must be non-empty. An empty separator is invalid.
-- The provider builder methods pass the builder's delimiter to the provider. Registering a
-  provider through `Builder::source` does not; that path keeps `.` unless the provider has an
-  explicit separator or `flat()`.
+- The provider builder methods pass the builder's final delimiter to the provider. The delimiter is
+  applied at build, so registration order relative to `Builder::delimiter` cannot change the
+  split. Registering a provider through `Builder::source` does not pass it; that path keeps `.`
+  unless the provider has an explicit separator or `flat()`.
 
 ### Values and collisions
 
@@ -52,7 +63,9 @@ All three providers map a name to nested maps through the same rules:
 - Arguments values are strings for `--key=value` and booleans for `--key` and `--no-key`.
 - A repeated scalar path keeps the later entry: argv order for `Arguments`, file order for
   `DotenvFile`, and original-name order for `Environment` (selected names are sorted first, so a
-  case-fold collision resolves the same way whatever order the environment returned).
+  case-fold collision resolves the same way whatever order the environment returned). Two names
+  with the identical original spelling reject the source, even when the prefix selects neither,
+  because the winner would depend on the order the pairs were returned in.
 - A path that would have to be both a scalar and a map rejects the source. It is never resolved by
   iteration order.
 - A non-Unicode environment name or value, a non-Unicode argv token, and a non-UTF-8 dotenv file
@@ -88,6 +101,86 @@ non-whitespace character is `#` is a comment; an unquoted `#` ends a value and s
 comment, while a `#` inside a quoted value stays literal. There is no interpolation and no
 environment mutation. A read failure is `SourceError::Unavailable`; an invalid document, invalid
 UTF-8, an empty key, or a mapping conflict is `SourceError::Invalid`.
+
+### File formats
+
+Every format has its own constructor (`JsonFile::new`, `Json5File::new`, `JsoncFile::new`,
+`TomlFile::new`, `YamlFile::new`, `IniFile::new`) and its own builder method. Nothing is inferred
+from a file extension, and no provider falls back to another format.
+
+A format source reads its path again on every load. There is no watcher and no holder in this
+release; reloading is the caller's decision, and a build always performs exactly one read.
+
+File-format keys are literal and hierarchical exactly as the document wrote them. The builder's
+delimiter is not applied as a key separator: a dotted key in a document is one key, not a nested
+path.
+
+| Feature | Dialect | Root | Duplicate names | Numbers |
+| --- | --- | --- | --- | --- |
+| `json` | RFC 8259 JSON, UTF-8 | object | later member wins | exact integer to `i128`, finite float |
+| `json5` | JSON5 1.0, UTF-8 | object | later member wins | exact integer to `i128`, finite float |
+| `jsonc` | JSON plus `//` and `/* */` comments | object | later member wins | exact integer to `i128`, finite float |
+| `toml` | TOML as implemented by `toml` 0.9 (spec 1.1.0) | table | rejected | `i64` integer, finite float |
+| `yaml` | YAML 1.2 core schema | mapping | rejected | exact integer to `i128`, finite float |
+| `ini` | the dialect below | map | later assignment wins | every value is a string |
+
+A document that holds a value the model cannot represent rejects the source with
+`SourceError::Unrepresentable`; it is never rounded. That covers an integer outside `i128` for
+JSON, JSON5, JSONC, and YAML, a non-finite float for those formats and TOML, and an empty or
+unrepresentable number token for any of them.
+
+#### JSON
+
+A byte-order mark, a comment, a trailing comma, a single-quoted string, an unquoted name, a
+hexadecimal number, `Infinity`, and `NaN` are not JSON and reject the source. A quoted number
+stays a string.
+
+#### JSON5
+
+JSON5 1.0 accepts comments, trailing commas, single-quoted strings, unquoted member names,
+hexadecimal numbers, a unary plus, a bare leading or trailing decimal point, `Infinity`, `NaN`, and
+multi-line strings. `Infinity`, `-Infinity`, `NaN`, and a decimal literal that overflows to
+infinity are unrepresentable. Negative zero keeps its float kind.
+
+#### JSONC
+
+JSONC is standard JSON plus `//` line comments and `/* */` block comments. It is not JSON5:
+trailing commas, single-quoted strings, unquoted names, hexadecimal numbers, a unary plus, a bare
+decimal point, `Infinity`, `NaN`, and JSON5 string escapes reject the source. The parser runs with
+every extension except comments disabled.
+
+#### TOML
+
+TOML keys and tables are used as the parser resolved them. A duplicate key or table is a TOML
+error. A date, time, or offset date-time becomes `Value::DateTime` with its canonical RFC 3339
+text; a typed read uses `DateTime`, never `String`. `nan`, `inf`, and `-inf` are unrepresentable.
+
+#### YAML
+
+The dialect is YAML 1.2 core schema. Rejected: an anchor, an alias, an explicit tag, a mapping key
+that is not a string, a duplicate mapping key, an empty document, and more than one document. A
+merge key is an alias or a tag in practice and is rejected. `yes` and `no` are strings under YAML
+1.2; a quoted scalar is always a string. A plain integer literal is read exactly into `i128`,
+including the `0x` and `0o` forms, and a value outside `i128` is unrepresentable rather than
+rounded.
+
+#### INI
+
+The INI dialect is this crate's own:
+
+- A line whose first non-whitespace character is `#` or `;` is a comment. There is no inline
+  comment: a `#` or `;` after content is part of the value.
+- `[name]` starts a section. The name is trimmed and must not be empty. It is one literal key, so
+  `[a.b]` is the key `a.b`, not a nested map.
+- `key = value` assigns a string. The first `=` separates the key and the value; both are trimmed,
+  the key must not be empty, and the value may be empty. One pair of matching wrapping single or
+  double quotes is removed. No escape and no interpolation is interpreted.
+- An assignment before the first section is a root key.
+- Every other line rejects the document, including a bare word and an unterminated section header.
+
+A later assignment to the same key wins. A repeated section header continues the existing section
+and later assignments merge into it; a root scalar and a section with the same name reject the
+document. Every value stays a string, including a numeric or boolean spelling.
 
 ## Merge
 
@@ -153,6 +246,8 @@ path `http` then `port`, while `http.port` is one component named `http.port`. U
   `f32` only when the narrowing is exact. An integer is never read as a float and a float is never
   read as an integer, even when the number has no fraction, so `1` does not satisfy an `f64` read
   and `1.0` does not satisfy an `i64` read. A string is never parsed as a number.
+- A `Value::DateTime` reads only as [`DateTime`](../src/value.rs). It is never read as a `String`,
+  and a string is never read as a `DateTime`. Only the `toml` feature produces this value.
 - A deserialization error carries a fixed shape label. A caller-supplied serde message, a custom
   expectation, and a value are all discarded.
 - A type mismatch names the source that wrote the failing leaf when the snapshot records one,
@@ -191,5 +286,11 @@ text. `Error::source()` is always `None`, so no nested error can reintroduce tex
 | Snapshot clone and value-free `Debug` | `tests/immutability.rs` |
 | Core with every provider feature off | `tests/providers_off.rs` |
 | Argument switches, collisions, and errors | `tests/arguments.rs` |
-| Environment mapping, case, and collisions | `tests/environment.rs` |
+| Environment mapping, case, duplicates, and collisions | `tests/environment.rs` |
 | Dotenv parsing, mapping, and errors | `tests/dotenv.rs` |
+| JSON, JSON5, JSONC, TOML, YAML, and INI end-to-end reads | `tests/formats.rs`, `src/source/*.rs` |
+| Each file source rereads its path | `tests/formats.rs` |
+| Duplicate-name rules per dialect | `src/source/json.rs`, `src/source/json5.rs`, `src/source/jsonc.rs`, `src/source/toml_file.rs`, `src/source/yaml.rs`, `src/source/ini.rs` |
+| Unrepresentable numbers are rejected, never rounded | `tests/formats.rs`, `src/source/*.rs` |
+| File path, document text, and parser text never reach an error | `tests/format_security.rs` |
+| TOML date-time is typed, not a string | `tests/formats.rs`, `src/source/toml_file.rs` |

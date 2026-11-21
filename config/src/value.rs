@@ -1,6 +1,8 @@
 //! The immutable configuration value tree.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
+
+use serde::de::{self, Deserializer, MapAccess, Visitor};
 
 /// A format-neutral configuration value.
 ///
@@ -31,6 +33,13 @@ pub enum Value {
     Float(f64),
     /// A string. A secret reference stays a string and is never resolved.
     String(String),
+    /// A date, time, or offset date-time.
+    ///
+    /// Only a TOML document produces this variant. It preserves the canonical RFC 3339 spelling
+    /// the parser produced, so a local date such as `1979-05-27`, a local time such as
+    /// `07:32:00`, and an offset date-time all keep their exact form. A typed read requires
+    /// [`DateTime`]; it is never read as a [`String`] and a string is never read as this.
+    DateTime(DateTime),
     /// An ordered list. Lists replace during a merge; they never concatenate.
     Array(Vec<Self>),
     /// A string-keyed map. Nested maps merge during a build; every other value replaces.
@@ -89,6 +98,7 @@ impl Value {
             Self::Integer(_) => "integer",
             Self::Float(_) => "float",
             Self::String(_) => "string",
+            Self::DateTime(_) => "datetime",
             Self::Array(_) => "array",
             Self::Map(_) => "map",
         }
@@ -117,14 +127,122 @@ impl Value {
             Self::Float(number) => number.is_finite(),
             Self::Array(items) => items.iter().all(Self::is_representable),
             Self::Map(map) => map.values().all(Self::is_representable),
-            Self::Null | Self::Bool(_) | Self::Integer(_) | Self::String(_) => true,
+            Self::Null | Self::Bool(_) | Self::Integer(_) | Self::String(_) | Self::DateTime(_) => {
+                true
+            }
         }
+    }
+}
+
+/// A date, time, or offset date-time, preserved without conversion.
+///
+/// A TOML document keeps the canonical RFC 3339 spelling the parser produced: a local date such
+/// as `1979-05-27`, a local time such as `07:32:00`, a local date-time, or an offset date-time.
+/// Whether the value carries a date, a time, and an offset is observable in the text, so nothing
+/// is dropped when a document is read into a [`Value`].
+///
+/// A typed read uses this type, `get::<DateTime>("started")`. It is never read as a [`String`],
+/// and a string is never read as this type.
+///
+/// ```
+/// use neotales_config::{Builder, DateTime, Value};
+///
+/// let config = Builder::new()
+///     .memory(
+///         "defaults",
+///         Value::map([("started", Value::from(DateTime::new("1979-05-27")))]),
+///     )
+///     .build()?;
+/// assert_eq!(config.get::<DateTime>("started")?.as_str(), "1979-05-27");
+/// # Ok::<(), neotales_config::Error>(())
+/// ```
+///
+/// # Secrets
+///
+/// [`std::fmt::Debug`] shows the text, like the rest of a [`Value`] tree. Do not log a date-time
+/// that came from a document you would not log.
+#[derive(Clone, Eq, PartialEq)]
+pub struct DateTime {
+    text: String,
+}
+
+impl DateTime {
+    /// Wraps RFC 3339 text without validating it.
+    ///
+    /// A value produced by a TOML source always holds canonical text. This constructor exists so
+    /// an in-memory or caller-supplied source can build a [`Value::DateTime`]; the caller owns the
+    /// spelling.
+    #[must_use]
+    pub fn new(text: impl Into<String>) -> Self {
+        Self { text: text.into() }
+    }
+
+    /// Returns the canonical RFC 3339 text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+}
+
+impl fmt::Display for DateTime {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        output.write_str(&self.text)
+    }
+}
+
+impl fmt::Debug for DateTime {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        output.debug_tuple("DateTime").field(&self.text).finish()
+    }
+}
+
+impl<'de> de::Deserialize<'de> for DateTime {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        /// Accepts exactly the one-field map the value cursor presents.
+        struct DateTimeVisitor;
+
+        impl<'de> Visitor<'de> for DateTimeVisitor {
+            type Value = DateTime;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a date-time")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut text = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    if key != "text" {
+                        return Err(de::Error::unknown_field(&key, &["text"]));
+                    }
+                    if text.is_some() {
+                        return Err(de::Error::duplicate_field("text"));
+                    }
+                    text = Some(map.next_value::<String>()?);
+                }
+                let text = text.ok_or_else(|| de::Error::missing_field("text"))?;
+                Ok(DateTime::new(text))
+            }
+        }
+
+        deserializer.deserialize_map(DateTimeVisitor)
     }
 }
 
 impl From<bool> for Value {
     fn from(value: bool) -> Self {
         Self::Bool(value)
+    }
+}
+
+impl From<DateTime> for Value {
+    fn from(value: DateTime) -> Self {
+        Self::DateTime(value)
     }
 }
 

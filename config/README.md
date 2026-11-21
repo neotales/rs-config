@@ -19,17 +19,33 @@ read:
 cargo add neotales-config@0.0.0-alpha.0 --features args
 cargo add neotales-config@0.0.0-alpha.0 --features environment
 cargo add neotales-config@0.0.0-alpha.0 --features dotenv
+cargo add neotales-config@0.0.0-alpha.0 --features json
+cargo add neotales-config@0.0.0-alpha.0 --features json5
+cargo add neotales-config@0.0.0-alpha.0 --features jsonc
+cargo add neotales-config@0.0.0-alpha.0 --features toml
+cargo add neotales-config@0.0.0-alpha.0 --features yaml
+cargo add neotales-config@0.0.0-alpha.0 --features ini
 ```
 
-The `dotenv` feature adds `neotales-dotenv`, the document parser. `args` and `environment` add code
-and no crate.
+The `dotenv`, `json`, `json5`, `jsonc`, `toml`, and `yaml` features add their parser crate.
+`args`, `environment`, and `ini` add code and no crate, because the INI parser is part of this
+crate.
 
-| Feature | Provider | Reads |
-| --- | --- | --- |
-| none | `Builder::memory`, `Builder::source` | caller-supplied values and closures |
-| `args` | `Builder::arguments`, `Arguments` | already-tokenized `OsString` argv |
-| `environment` | `Builder::environment`, `Environment` | the process environment or fixed pairs |
-| `dotenv` | `Builder::dotenv_file`, `DotenvFile` | one caller-supplied dotenv file |
+| Feature | Provider | Reads | Adds |
+| --- | --- | --- | --- |
+| none | `Builder::memory`, `Builder::source` | caller-supplied values and closures | nothing |
+| `args` | `Builder::arguments`, `Arguments` | already-tokenized `OsString` argv | code |
+| `environment` | `Builder::environment`, `Environment` | the process environment or fixed pairs | code |
+| `dotenv` | `Builder::dotenv_file`, `DotenvFile` | one caller-supplied dotenv file | `neotales-dotenv` |
+| `json` | `Builder::json_file`, `JsonFile` | RFC 8259 JSON | `serde_json` |
+| `json5` | `Builder::json5_file`, `Json5File` | JSON5 1.0 | `json5` |
+| `jsonc` | `Builder::jsonc_file`, `JsoncFile` | JSON plus comments | `jsonc-parser` |
+| `toml` | `Builder::toml_file`, `TomlFile` | TOML 1.1 | `toml` |
+| `yaml` | `Builder::yaml_file`, `YamlFile` | YAML 1.2 core schema | `saphyr`, `saphyr-parser` |
+| `ini` | `Builder::ini_file`, `IniFile` | the documented INI dialect | code |
+
+The formats are separate on purpose. Enabling `json` compiles no YAML parser, and a build with no
+feature has no parser in its dependency graph.
 
 ## What you can do ⚙️
 
@@ -118,8 +134,11 @@ assert_eq!(config.origin("http").unwrap(), "defaults");
 `:`, `http:port` is two components and `http.port` is one component whose name contains a dot. Any
 other character is refused at `build()` with an invalid-delimiter error, before a source is read.
 The provider builder methods pass this delimiter to the provider as its default key separator, so
-an environment name or switch written with the same character maps the same way. An explicit
-`separator` overrides it, and `flat()` disables splitting.
+an environment name or switch written with the same character maps the same way. The delimiter is
+applied when `build()` runs, not when the provider is registered: `.environment(..).delimiter(':')`
+and `.delimiter(':').environment(..)` map identically. An explicit `separator` overrides it, and
+`flat()` disables splitting. A file-format provider never takes the delimiter; a document already
+expresses its own structure and every key is literal.
 
 ```rust
 use neotales_config::{Builder, Value};
@@ -195,13 +214,15 @@ assert_eq!(config.get::<String>("http.port").unwrap(), "8080");
 
 `Environment::process()` reads the process environment once, at build. `Environment::from_pairs`
 keeps a test or a snapshot out of the process, and no provider writes to it. The prefix is removed
-before the key is split. With no explicit separator, the builder's delimiter is the separator;
-`flat()` keeps the remainder as one component, and an explicit `separator` overrides the delimiter.
-Selected names are sorted by original spelling, so `APP_A` and `APP_a` with `Case::Lower` resolve
-the same way whatever order the environment returned; the later name wins at one path. Two names
-that would need one key to be both a scalar and a map reject the source. An empty key, an empty
-path component, an empty separator, and a non-Unicode name or value are invalid. An error names
-the source and the kind, never a variable or a value.
+before the key is split. With no explicit separator, the builder's final delimiter is the separator,
+whatever order `delimiter()` and `environment()` were called in; `flat()` keeps the remainder as one
+component, and an explicit `separator` overrides the delimiter. Selected names are sorted by original
+spelling, so `APP_A` and `APP_a` with `Case::Lower` resolve the same way whatever order the
+environment returned; the later name wins at one path. Two pairs with the identical original name
+reject the source instead, even when the prefix selects neither copy, because which value won would
+depend on the order they were returned in. Two names that would need one key to be both a scalar and
+a map reject the source. An empty key, an empty path component, an empty separator, and a non-Unicode
+name or value are invalid. An error names the source and the kind, never a variable or a value.
 
 **Read a dotenv file.** The `dotenv` feature adds `DotenvFile`, which parses one caller-supplied
 file with `neotales-dotenv`. It never interpolates a value and never changes the process
@@ -227,6 +248,56 @@ one component. A later assignment wins at the same path. An invalid line, an emp
 path component, a non-UTF-8 file, and a scalar/map conflict reject the source. The error carries
 no path, line, or value. Reading the file is the only I/O; the process environment is never read
 or written.
+
+**Read a configuration file.** Each format is a separate opt-in feature and an explicit
+constructor. Nothing is inferred from a file extension, and no source tries the next format when
+one fails.
+
+```rust,no_run
+use neotales_config::{Builder, IniFile, JsonFile, TomlFile, YamlFile};
+
+let config = Builder::new()
+    .json_file("defaults", JsonFile::new("config/defaults.json"))
+    .toml_file("site", TomlFile::new("config/site.toml"))
+    .yaml_file("overlay", YamlFile::new("config/overlay.yaml"))
+    .ini_file("local", IniFile::new("config/local.ini"))
+    .build()
+    .expect("configuration builds");
+```
+
+The JSON5 and JSONC constructors are the same shape: `Json5File::new(path)` and
+`JsoncFile::new(path)`. A provider reads its path again on every load, so rebuilding or reloading
+the same source sees a replaced file. There is no watcher and no reload holder in this release.
+
+| Feature | Dialect | Root | Duplicate names | Number rule |
+| --- | --- | --- | --- | --- |
+| `json` | RFC 8259 JSON | object | later member wins | integer exact to `i128`, finite float |
+| `json5` | JSON5 1.0 | object | later member wins | integer exact to `i128`, finite float |
+| `jsonc` | JSON plus `//` and `/* */` comments | object | later member wins | integer exact to `i128`, finite float |
+| `toml` | TOML 1.1 | always a table | rejected | `i64` integer, finite float |
+| `yaml` | YAML 1.2 core schema | mapping | rejected | integer exact to `i128`, finite float |
+| `ini` | the dialect below | always a map | later assignment wins | every value is a string |
+
+A value the model cannot hold rejects the source with an unrepresentable-value error; it is never
+rounded. For JSON, JSON5, JSONC, and YAML that includes an integer outside `i128` and a float that
+is not finite. For TOML it includes `nan`, `inf`, and `-inf`. TOML dates and times stay typed as
+`DateTime`; JSON, JSON5, JSONC, YAML, and INI have no date-time kind.
+
+JSONC is not JSON5. It accepts standard JSON plus `//` line comments and `/* */` block comments; a
+trailing comma, a single-quoted string, an unquoted name, a hexadecimal number, `Infinity`, and
+`NaN` reject it. JSON5 accepts all of those extensions.
+
+YAML accepts the YAML 1.2 core schema and rejects anchors, aliases, explicit tags, non-string keys,
+duplicate keys, an empty document, and more than one document. A merge key is an alias or a tag in
+practice, so it is rejected too. `yes` and `no` are strings under YAML 1.2; use `true` and `false`
+for booleans.
+
+INI uses the plain dialect this crate defines. A `[section]` header is one literal key, so
+`[a.b]` is the key `a.b`, not a nested map. An assignment before the first section is a root key.
+A line whose first non-whitespace character is `#` or `;` is a comment, and an inline `#`/`;` is
+part of the value. One pair of matching wrapping quotes is removed and no escape or interpolation
+is interpreted. A repeated key keeps its last value; a repeated section header continues the
+existing section; a root scalar and a section with the same name reject the file.
 
 **Implement a source.** A source returns a map root or a `SourceError` that carries a kind and no
 message. A closure implements `Source`, so a provider in another crate cannot leak a value through

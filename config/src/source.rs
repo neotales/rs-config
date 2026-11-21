@@ -10,8 +10,29 @@ mod arguments;
 mod dotenv_file;
 #[cfg(feature = "environment")]
 mod environment;
+#[cfg(any(
+    feature = "json",
+    feature = "json5",
+    feature = "jsonc",
+    feature = "toml",
+    feature = "yaml",
+    feature = "ini"
+))]
+mod file;
+#[cfg(feature = "ini")]
+mod ini;
+#[cfg(feature = "json")]
+mod json;
+#[cfg(feature = "json5")]
+mod json5;
+#[cfg(feature = "jsonc")]
+mod jsonc;
 #[cfg(any(feature = "args", feature = "environment", feature = "dotenv"))]
 mod keys;
+#[cfg(feature = "toml")]
+mod toml_file;
+#[cfg(feature = "yaml")]
+mod yaml;
 
 #[cfg(feature = "args")]
 pub use self::arguments::Arguments;
@@ -19,6 +40,18 @@ pub use self::arguments::Arguments;
 pub use self::dotenv_file::DotenvFile;
 #[cfg(feature = "environment")]
 pub use self::environment::{Case, Environment};
+#[cfg(feature = "ini")]
+pub use self::ini::IniFile;
+#[cfg(feature = "json")]
+pub use self::json::JsonFile;
+#[cfg(feature = "json5")]
+pub use self::json5::Json5File;
+#[cfg(feature = "jsonc")]
+pub use self::jsonc::JsoncFile;
+#[cfg(feature = "toml")]
+pub use self::toml_file::TomlFile;
+#[cfg(feature = "yaml")]
+pub use self::yaml::YamlFile;
 
 /// A built-in provider that waits for the builder's final delimiter.
 ///
@@ -82,8 +115,9 @@ pub trait Source: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`SourceError::unavailable`] when the source could not be read, or
-    /// [`SourceError::invalid`] when it rejected its own document.
+    /// Returns [`SourceError::unavailable`] when the source could not be read,
+    /// [`SourceError::invalid`] when it rejected its own document, or
+    /// [`SourceError::unrepresentable`] when a value cannot be held without loss.
     fn load(&self) -> Result<Value, SourceError>;
 }
 

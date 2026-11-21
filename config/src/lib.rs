@@ -29,21 +29,29 @@
 //! # Providers
 //!
 //! The core is memory-only: a caller supplies a [`Value`] map or implements [`Source`]. Process
-//! arguments, the process environment, and a dotenv file are opt-in sources, each behind its own
-//! feature and each registered explicitly:
+//! arguments, the process environment, and a dotenv file are opt-in sources, as is one source per
+//! file format. Every provider is behind its own feature and is registered explicitly:
 //!
 //! | Feature | Provider | Dependency |
 //! | --- | --- | --- |
 //! | `args` | `Arguments` | none |
 //! | `environment` | `Environment` | none |
 //! | `dotenv` | `DotenvFile` | `neotales-dotenv` |
+//! | `json` | `JsonFile` | `serde_json` |
+//! | `json5` | `Json5File` | `json5` |
+//! | `jsonc` | `JsoncFile` | `jsonc-parser` |
+//! | `toml` | `TomlFile` | `toml` |
+//! | `yaml` | `YamlFile` | `saphyr`, `saphyr-parser` |
+//! | `ini` | `IniFile` | none |
 //!
-//! No feature is on by default. A provider value stays a string unless it is an argv boolean, and
-//! no provider writes to the process environment. The dedicated builder methods apply the
-//! builder's final delimiter as the provider's default key separator, whatever order the
-//! registration and the delimiter were given in.
+//! No feature is on by default. A provider value stays a string unless it is an argv boolean or a
+//! format value, and no provider writes to the process environment. The dedicated provider builder
+//! methods apply the builder's final delimiter as the default key separator, whatever order the
+//! registration and the delimiter were given in. File formats do not take a separator: their
+//! structure is already expressed by the document, so every key is used literally.
 //!
-//! There is no file-format, reload, vault, or remote provider in this release.
+//! A file source reads its path again on every load. There is no watcher, no reload holder, and no
+//! vault resolution in this release.
 //!
 //! # Example
 //!
@@ -81,11 +89,23 @@ mod value;
 pub use self::config::{Builder, Config};
 pub use self::error::{Error, SourceError, SourceErrorKind};
 pub use self::source::Source;
-pub use self::value::Value;
+pub use self::value::{DateTime, Value};
 
 #[cfg(feature = "args")]
 pub use self::source::Arguments;
 #[cfg(feature = "dotenv")]
 pub use self::source::DotenvFile;
+#[cfg(feature = "ini")]
+pub use self::source::IniFile;
+#[cfg(feature = "json5")]
+pub use self::source::Json5File;
+#[cfg(feature = "json")]
+pub use self::source::JsonFile;
+#[cfg(feature = "jsonc")]
+pub use self::source::JsoncFile;
+#[cfg(feature = "toml")]
+pub use self::source::TomlFile;
+#[cfg(feature = "yaml")]
+pub use self::source::YamlFile;
 #[cfg(feature = "environment")]
 pub use self::source::{Case, Environment};

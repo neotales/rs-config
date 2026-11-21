@@ -12,6 +12,11 @@ pub enum SourceErrorKind {
     Unavailable,
     /// The source rejected its document.
     Invalid,
+    /// The document holds a value the value model cannot represent without loss.
+    ///
+    /// Today that means a number: a float that is not finite, or an integer outside `i128`. A
+    /// format source reports this instead of rounding the number or returning a wrong one.
+    Unrepresentable,
 }
 
 /// Failure returned by a caller-supplied [`crate::Source`].
@@ -39,6 +44,17 @@ impl SourceError {
         }
     }
 
+    /// The document holds a value the value model cannot represent without loss.
+    ///
+    /// A format source reports a number outside the model this way, so a caller can tell a
+    /// rounded or clipped value apart from a malformed document.
+    #[must_use]
+    pub const fn unrepresentable() -> Self {
+        Self {
+            kind: SourceErrorKind::Unrepresentable,
+        }
+    }
+
     /// Returns the failure kind.
     #[must_use]
     pub const fn kind(self) -> SourceErrorKind {
@@ -51,6 +67,9 @@ impl fmt::Display for SourceError {
         match self.kind {
             SourceErrorKind::Unavailable => output.write_str("source unavailable"),
             SourceErrorKind::Invalid => output.write_str("source rejected the document"),
+            SourceErrorKind::Unrepresentable => {
+                output.write_str("source has a value the model cannot represent")
+            }
         }
     }
 }
@@ -156,10 +175,17 @@ impl Error {
     }
 
     pub(crate) fn from_source(name: impl Into<String>, error: SourceError) -> Self {
-        Self {
-            kind: ErrorKind::Source {
-                name: name.into(),
-                kind: error.kind,
+        let name = name.into();
+        match error.kind {
+            // An unrepresentable value is a distinct outcome: the document was read, but a value
+            // in it cannot be held exactly. Reporting it as a plain source rejection would hide
+            // that from a caller that checks `is_unrepresentable`.
+            SourceErrorKind::Unrepresentable => Self::unrepresentable(name),
+            SourceErrorKind::Unavailable | SourceErrorKind::Invalid => Self {
+                kind: ErrorKind::Source {
+                    name,
+                    kind: error.kind,
+                },
             },
         }
     }
@@ -333,9 +359,18 @@ impl fmt::Display for Error {
                 SourceErrorKind::Invalid => {
                     write!(output, "source `{name}` rejected the document")
                 }
+                SourceErrorKind::Unrepresentable => {
+                    write!(
+                        output,
+                        "source `{name}` has a value the model cannot represent"
+                    )
+                }
             },
             ErrorKind::Unrepresentable { name } => {
-                write!(output, "source `{name}` has a non-finite number")
+                write!(
+                    output,
+                    "source `{name}` has a value the model cannot represent"
+                )
             }
             ErrorKind::RootNotMap { name } => {
                 write!(output, "source `{name}` root must be a map")

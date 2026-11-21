@@ -206,6 +206,9 @@ impl<'de> Deserializer<'de> for Cursor<'de, '_> {
                 Value::Integer(number) => visit_integer(*number, visitor),
                 Value::Float(number) => visitor.visit_f64(*number),
                 Value::String(text) => visitor.visit_borrowed_str(text),
+                Value::DateTime(date_time) => {
+                    visitor.visit_map(DateTimeAccess::new(date_time.as_str()))
+                }
                 Value::Array(items) => visitor.visit_seq(SequenceAccess {
                     items: items.iter(),
                     index: 0,
@@ -426,6 +429,9 @@ impl<'de> Deserializer<'de> for Cursor<'de, '_> {
                 pending: None,
                 path: self.path,
             }),
+            Node::Value(Value::DateTime(date_time)) => {
+                visitor.visit_map(DateTimeAccess::new(date_time.as_str()))
+            }
             _ => Err(DeError::mismatch("a map")),
         }
     }
@@ -538,6 +544,43 @@ impl<'de> SeqAccess<'de> for SequenceAccess<'de, '_> {
 
     fn size_hint(&self) -> Option<usize> {
         Some(self.items.len())
+    }
+}
+
+/// Presents a [`Value::DateTime`] as the one-field map its `Deserialize` implementation expects.
+struct DateTimeAccess<'de> {
+    text: &'de str,
+    read_key: bool,
+}
+
+impl<'de> DateTimeAccess<'de> {
+    const fn new(text: &'de str) -> Self {
+        Self {
+            text,
+            read_key: false,
+        }
+    }
+}
+
+impl<'de> MapAccess<'de> for DateTimeAccess<'de> {
+    type Error = DeError;
+
+    fn next_key_seed<K: DeserializeSeed<'de>>(
+        &mut self,
+        seed: K,
+    ) -> Result<Option<K::Value>, DeError> {
+        if self.read_key {
+            return Ok(None);
+        }
+        self.read_key = true;
+        let mut path = Vec::new();
+        seed.deserialize(Cursor::new(Node::Str("text"), &mut path))
+            .map(Some)
+    }
+
+    fn next_value_seed<V: DeserializeSeed<'de>>(&mut self, seed: V) -> Result<V::Value, DeError> {
+        let mut path = Vec::new();
+        seed.deserialize(Cursor::new(Node::Str(self.text), &mut path))
     }
 }
 

@@ -1,0 +1,30 @@
+{
+  // Editors write this file; keep the comments.
+  "service": {
+    "name": "gateway",
+    "workers": 4,
+    "debug": false
+  },
+  "http": {
+    /* Bound to loopback in the default profile. */
+    "host": "127.0.0.1",
+    "port": 8080,
+    "timeouts": {
+      "read_ms": 5000,
+      "write_ms": 2500
+    }
+  },
+  "database": {
+    "url": "postgres://app@db.internal/app",
+    "pool": {
+      "min": 2,
+      "max": 20
+    }
+  },
+  "logging": {
+    "level": "info",
+    "targets": ["stdout", "file"]
+  },
+  "ratio": 0.25,
+  "big": 18446744073709551617
+}

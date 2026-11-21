@@ -172,6 +172,69 @@ impl Builder {
         self.provider(name, Deferred::DotenvFile(file))
     }
 
+    /// Registers a JSON file source. Requires the `json` feature.
+    ///
+    /// The file is read at build and again whenever the source is loaded. It is read as RFC 8259
+    /// JSON; comments and trailing commas are not accepted. See [`crate::JsonFile`].
+    #[cfg(feature = "json")]
+    #[must_use]
+    pub fn json_file(self, name: impl Into<String>, file: crate::JsonFile) -> Self {
+        self.source(name, file)
+    }
+
+    /// Registers a JSON5 file source. Requires the `json5` feature.
+    ///
+    /// The file is read at build and again whenever the source is loaded. JSON5 is a distinct
+    /// dialect from JSONC: it accepts unquoted names, single-quoted strings, hexadecimal numbers,
+    /// trailing commas, `Infinity`, and `NaN`. See [`crate::Json5File`].
+    #[cfg(feature = "json5")]
+    #[must_use]
+    pub fn json5_file(self, name: impl Into<String>, file: crate::Json5File) -> Self {
+        self.source(name, file)
+    }
+
+    /// Registers a JSONC file source. Requires the `jsonc` feature.
+    ///
+    /// The file is read at build and again whenever the source is loaded. JSONC is standard JSON
+    /// plus `//` and `/* */` comments; JSON5-only syntax and trailing commas are rejected. See
+    /// [`crate::JsoncFile`].
+    #[cfg(feature = "jsonc")]
+    #[must_use]
+    pub fn jsonc_file(self, name: impl Into<String>, file: crate::JsoncFile) -> Self {
+        self.source(name, file)
+    }
+
+    /// Registers a TOML file source. Requires the `toml` feature.
+    ///
+    /// The file is read at build and again whenever the source is loaded. A TOML date or time is
+    /// kept as [`crate::DateTime`]. See [`crate::TomlFile`].
+    #[cfg(feature = "toml")]
+    #[must_use]
+    pub fn toml_file(self, name: impl Into<String>, file: crate::TomlFile) -> Self {
+        self.source(name, file)
+    }
+
+    /// Registers a YAML file source. Requires the `yaml` feature.
+    ///
+    /// The file is read at build and again whenever the source is loaded. Anchors, aliases, tags,
+    /// duplicate keys, non-string keys, and multiple documents are rejected. See
+    /// [`crate::YamlFile`].
+    #[cfg(feature = "yaml")]
+    #[must_use]
+    pub fn yaml_file(self, name: impl Into<String>, file: crate::YamlFile) -> Self {
+        self.source(name, file)
+    }
+
+    /// Registers an INI file source. Requires the `ini` feature.
+    ///
+    /// The file is read at build and again whenever the source is loaded. Values stay strings and
+    /// no interpolation is performed. See [`crate::IniFile`].
+    #[cfg(feature = "ini")]
+    #[must_use]
+    pub fn ini_file(self, name: impl Into<String>, file: crate::IniFile) -> Self {
+        self.source(name, file)
+    }
+
     /// Registers a built-in provider whose default key separator is the builder's final delimiter.
     ///
     /// The delimiter is applied at build, not here, so registration order cannot decide the

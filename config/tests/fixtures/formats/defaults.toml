@@ -1,0 +1,27 @@
+ratio = 0.25
+large = 9223372036854775807
+
+[service]
+name = "gateway"
+workers = 4
+debug = false
+started = 1979-05-27T07:32:00
+
+[http]
+host = "127.0.0.1"
+port = 8080
+
+[http.timeouts]
+read_ms = 5000
+write_ms = 2500
+
+[database]
+url = "postgres://app@db.internal/app"
+
+[database.pool]
+min = 2
+max = 20
+
+[logging]
+level = "info"
+targets = ["stdout", "file"]
