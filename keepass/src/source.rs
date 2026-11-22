@@ -26,11 +26,11 @@ const SUPPORTED_DELIMITERS: [char; 5] = ['.', ':', '/', ',', '|'];
 /// the mappings validate and the file opens successfully. A load is the initial build, every
 /// manual `neotales_config::Reload::refresh`, and a polling pass that actually loads because a
 /// watched file changed, a watched path could not be read, or an earlier load failed. A polling
-/// pass over unchanged files does not load and does not call the factory, and a load that fails
+/// pass that loads for none of those reasons does not call the factory, and a load that fails
 /// validation or cannot open the file calls it zero times. The reload watcher fingerprints only
-/// the KDBX path, so a change in the credential source alone is invisible to it; call
-/// `neotales_config::Reload::refresh` after rotating a credential. The returned credentials are
-/// dropped after that one load.
+/// the KDBX path, so a change in the credential source alone triggers no poll of its own; any load
+/// reads the credentials again, and a manual `neotales_config::Reload::refresh` is the way to
+/// rotate one. The returned credentials are dropped after that one load.
 ///
 /// The factory is the only credential path. The provider never reads a password itself, never
 /// opens a key file, never discovers a vault, and never prompts. Implement the factory with a value
@@ -240,15 +240,16 @@ impl KeePassFile {
     ///
     /// The default is `true`. With `false`, [`Source::watch_paths`] returns an empty list for this
     /// source, so a poll does not watch the vault on this source's account. That removes **only
-    /// this source's contribution** to the watched path list: a change in any other watched path
-    /// still loads every source, including this one, and a manual `Reload::refresh` always loads
-    /// every source. If another source reports the same path, the path stays watched and a change
-    /// to it is observed. If no source reports a path at all, `Reload::start_watching` returns
-    /// `WatchError::NoWatchableSources`.
+    /// this source's contribution** to the watched path list: any poll that performs a load for
+    /// another reason — a change in another watched path, a watched path that cannot be
+    /// fingerprinted, or a pending failure being retried — still loads every source, including
+    /// this one, and a manual `Reload::refresh` always loads every source. If another source
+    /// reports the same path, the path stays watched and a change to it is observed. If no source
+    /// reports a path at all, `Reload::start_watching` returns `WatchError::NoWatchableSources`.
     ///
     /// This setting is independent of [`Self::optional`]: it changes what is observed, not whether
-    /// an absent vault is accepted. A change in the credential source is never observable here;
-    /// call `Reload::refresh` after rotating a credential.
+    /// an absent vault is accepted. A change in the credential source triggers no poll of its own,
+    /// but any load reads it again; call `Reload::refresh` after rotating a credential.
     #[must_use]
     pub const fn reload_on_change(mut self, reload_on_change: bool) -> Self {
         self.reload_on_change = reload_on_change;
@@ -383,7 +384,8 @@ impl Source for KeePassFile {
     fn watch_paths(&self) -> Vec<PathBuf> {
         // The path is reported even when the file is absent: creation, replacement, and deletion
         // are all changes the reload watcher should poll for. The credential source is not a path
-        // and is not reported; a credential-only change needs a manual refresh.
+        // and is not reported, so a credential-only change triggers no poll of its own; any load,
+        // including a manual refresh, reads the credentials again.
         if self.reload_on_change {
             vec![self.path.clone()]
         } else {

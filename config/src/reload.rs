@@ -42,8 +42,10 @@
 //!   is why [`crate::Source::watch_paths`] and the providers' `reload_on_change` switch only
 //!   remove one source's contribution to that list. A source whose contents also depend on
 //!   something else, such as a credential store, cannot report a change in that input, so a change
-//!   there starts no poll of its own; call [`Reload::refresh`] after changing it. A poll started by
-//!   another watched path still loads every source, so it can pick that change up as well.
+//!   there starts no poll of its own; call [`Reload::refresh`] after changing it. A poll that
+//!   performs a load for another reason — a change in another watched path, a watched path that
+//!   cannot be fingerprinted, or a pending failure being retried — still loads every source, so it
+//!   can pick that change up as well.
 //! - An absent path, an unreadable path, and a readable file are distinct observations. Only an
 //!   actual [`std::io::ErrorKind::NotFound`] counts as absent, which is the one case an optional
 //!   source accepts as missing. A path that exists but cannot be fingerprinted (a directory, a
@@ -73,9 +75,10 @@
 //!   to observe; use [`Reload::refresh`] when the caller knows its input changed. A file source
 //!   with `reload_on_change(false)` contributes no path for the same reason, even though
 //!   [`Reload::refresh`] still loads it. A change to that file therefore does not trigger a poll
-//!   while no source reports its path, and is picked up only when a poll started by another
-//!   watched path, or a manual refresh, loads every source. If another source reports the same
-//!   path, the path stays watched and a change to it triggers a poll by itself.
+//!   while no source reports its path, and is picked up only by a poll that performs a load for
+//!   another reason — a change in another watched path, a watched path that cannot be
+//!   fingerprinted, or a pending failure being retried — or by a manual refresh. If another source
+//!   reports the same path, the path stays watched and a change to it triggers a poll by itself.
 //!
 //! # Lifecycle and shutdown
 //!
@@ -312,12 +315,13 @@ impl Reload {
     /// observable can change; that includes a failure left pending by an earlier manual refresh,
     /// which needs [`Reload::refresh`] to retry. A change in an input that is not a watched path,
     /// such as a credential store, cannot trigger a poll by itself; call [`Reload::refresh`] after
-    /// changing it. A poll started by another watched path also reloads every source, so it can
-    /// pick that change up as well. A file source with `reload_on_change(false)` contributes no
-    /// path of its own: a change to that file does not trigger a poll while no other source
-    /// reports the same path, and is picked up only when a poll started by another watched path,
-    /// or a manual refresh, loads every source. If another source reports the path, it stays
-    /// watched and a change to it triggers a poll by itself.
+    /// changing it. A poll that performs a load for another reason — a change in another watched
+    /// path, a watched path that cannot be fingerprinted, or a pending failure being retried — also
+    /// reloads every source, so it can pick that change up as well. A file source with
+    /// `reload_on_change(false)` contributes no path of its own: a change to that file does not
+    /// trigger a poll while no other source reports the same path, and is picked up only when a
+    /// poll performs such a load, or a manual refresh loads every source. If another source
+    /// reports the path, it stays watched and a change to it triggers a poll by itself.
     ///
     /// A watched path that is absent is not the same observation as one that exists but cannot be
     /// fingerprinted. Only an actual [`std::io::ErrorKind::NotFound`] counts as absent; a directory

@@ -358,7 +358,7 @@ fn a_poll_observes_only_enabled_files_and_a_manual_refresh_observes_all() {
         .expect("the fixture builds");
     assert_eq!(reload.watched_path_count(), 1);
 
-    // Changing only the un-watched file is invisible to a poll.
+    // Changing only the un-watched file does not trigger a poll.
     fs::write(&quiet, "quiet = 9191\n").expect("the replacement is writable");
     assert_eq!(reload.refresh_if_changed(), RefreshOutcome::Unchanged);
     assert_eq!(reload.config().get::<i64>("quiet").unwrap(), 9090);

@@ -185,11 +185,12 @@ defaults preserve the prior behavior.
   A poll therefore cannot observe the file on that source's account, but a load started for any
   other reason loads every source, so a value from the file can still appear in the published
   snapshot. A change to that file does not trigger a poll while no other source reports the same
-  path; it is picked up only when a poll started by another watched path, or `Reload::refresh`,
-  loads every source. The watched list is the union of what the sources report: two sources may
-  name the same path, and it stays watched while either reports it, so a change to a shared path
-  triggers a poll by itself. If no source reports a path, `Reload::start_watching` returns
-  `WatchError::NoWatchableSources`.
+  path; it is picked up only when a poll performs a load for another reason — a change in another
+  watched path, a watched path that cannot be fingerprinted, or a pending failure being retried —
+  or when `Reload::refresh` loads every source. The watched list is the union of what the sources
+  report: two sources may name the same path, and it stays watched while either reports it, so a
+  change to a shared path triggers a poll by itself. If no source reports a path,
+  `Reload::start_watching` returns `WatchError::NoWatchableSources`.
 
 File-format keys are literal and hierarchical exactly as the document wrote them. The builder's
 delimiter is not applied as a key separator: a dotted key in a document is one key, not a nested
@@ -327,11 +328,12 @@ The `reload` feature is code only: it adds no dependency and starts no thread by
 - Change detection covers only the paths a source reports through `Source::watch_paths`. A file
   provider with `reload_on_change(false)` contributes none for that source, so a change to its file
   does not trigger a poll while no other source reports the same path; that change is picked up by
-  a poll another watched path starts, or by `Reload::refresh`. An input that is not one of those
-  files (for example a credential store) is the same: only another watched change or a manual
-  refresh loads every source and reads it. A poll that does load reads every source, including one
-  whose change watching is off, and the watched list is the union across sources, so a path
-  another source reports stays watched and a change to it triggers a poll by itself.
+  a poll that performs a load for any other reason — another watched path changed, a watched path
+  cannot be fingerprinted, a failed load is being retried — or by `Reload::refresh`. An input that
+  is not one of those files (for example a credential store) is the same: it cannot trigger a
+  poll, but any poll that loads reads every source, including it and one whose change watching is
+  off. The watched list is the union across sources, so a path another source reports stays
+  watched and a change to it triggers a poll by itself.
 - A partially written file safely fails and is retried on the next poll even without a content
   change; an atomic rename is still the recommended write pattern.
 - A published snapshot holds merged values in plaintext. Only the newest snapshot is held by the

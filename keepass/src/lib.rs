@@ -21,12 +21,12 @@
 //!   prompts. The file is opened read-only, passed to the codec as a stream, and never written.
 //! - [`CredentialFactory`] is called at most once for every load, after the mappings validate and
 //!   the file opens successfully. A load is the initial build, a manual
-//!   `neotales_config::Reload::refresh`, or a polling pass that actually reloads because a watched
-//!   file changed or an earlier load failed. A polling pass over unchanged files does not load and
-//!   does not call the factory, and a load that fails validation or cannot open the file calls it
-//!   zero times. A credential-only change is invisible to the file watcher, so call
-//!   `Reload::refresh` after rotating a credential. The returned
-//!   [`neotales_keepass::KdbxCredentials`] is dropped after that load.
+//!   `neotales_config::Reload::refresh`, or a polling pass that actually loads because a watched
+//!   file changed, a watched path could not be read, or an earlier load failed. A polling pass
+//!   that loads for none of those reasons does not call the factory, and neither does a load that
+//!   fails validation or cannot open the file. A credential-only change triggers no poll of its
+//!   own, but any load reads the credentials again; call `Reload::refresh` after rotating a
+//!   credential. The returned [`neotales_keepass::KdbxCredentials`] is dropped after that load.
 //! - [`KeePassFile::new`] requires [`neotales_keepass::KdbxReadLimits`]. There is no hidden default:
 //!   the caller selects the budget for the trust boundary of the vault.
 //! - Every [`Mapping`] names an entry UUID, a field key, and a configuration path. A mapped entry
@@ -47,9 +47,9 @@
 //!   reject the source. The default is `false`: the vault is required.
 //! - [`Source::watch_paths`](neotales_config::Source::watch_paths) reports the KDBX path even when
 //!   the file does not exist yet. [`KeePassFile::reload_on_change`] with `false` keeps the path out
-//!   of the polling watcher on this source's account only: a poll that loads because another
-//!   watched path changed still loads the vault, and a manual `neotales_config::Reload::refresh`
-//!   always loads it. The path stays watched if another source reports it. The default is `true`.
+//!   of the polling watcher on this source's account only: any poll that performs a load for
+//!   another reason still loads the vault, and a manual `neotales_config::Reload::refresh` always
+//!   loads it. The path stays watched if another source reports it. The default is `true`.
 //!   With the core `reload` feature, the explicit polling watcher therefore notices a replacement
 //!   and a failed reload leaves the previous good snapshot in place. This crate's own `reload`
 //!   feature only forwards that core feature.

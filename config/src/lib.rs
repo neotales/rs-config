@@ -58,9 +58,11 @@
 //! the path is opened becomes an empty source, while a directory, a permission failure, a
 //! non-UTF-8 document, and a parse failure still fail the source. `reload_on_change(false)`
 //! changes only the second, and only for that source: the path is not reported to the polling
-//! watcher on its account, so a manual `Reload::refresh` still loads the source. A poll triggered
-//! by any other watched path also loads every source, and a path another source reports stays
-//! watched. The two flags are independent, and both defaults keep the pre-existing behavior.
+//! watcher on its account, so a manual `Reload::refresh` still loads the source. A poll that
+//! performs a load for another reason — a change in another watched path, a watched path that
+//! cannot be fingerprinted, or a pending failure being retried — also loads every source, and a
+//! path another source reports stays watched. The two flags are independent, and both defaults
+//! keep the pre-existing behavior.
 //!
 #![cfg_attr(
     feature = "reload",

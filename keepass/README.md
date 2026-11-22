@@ -125,13 +125,14 @@ configured delimiter splits.
 `Fn() -> Result<KdbxCredentials, SourceError> + Send + Sync`. The provider calls it **at most once
 per load**, after the mappings validate and the file opens successfully: the initial build, every
 `Reload::refresh`, and a watcher pass that actually loads because a watched file changed, a watched
-path could not be read, or an earlier load failed. A watcher pass over unchanged files does not
-load and does not call the factory, and a load that fails validation or cannot open the file calls
+path could not be read, or an earlier load failed. A watcher pass that loads for none of those
+reasons does not call the factory, and a load that fails validation or cannot open the file calls
 it zero times. The returned credentials are dropped after that load.
 
-The watcher fingerprints only the KDBX path. If only the credential source changes, the file
-fingerprint is unchanged and the watcher does not reload; call `Reload::refresh()` yourself after
-rotating a credential.
+The watcher fingerprints only the KDBX path. If only the credential source changes, the KDBX
+fingerprint is unchanged and the credential change triggers no poll of its own; call
+`Reload::refresh()` yourself after rotating a credential. A poll that loads for another reason calls
+the factory again, so it can pick up the new credentials too.
 
 The factory runs on whichever thread performs the load, including the watcher thread. It must not
 prompt, and it must be safe to call from more than one thread. The error type is `SourceError`,
@@ -152,11 +153,13 @@ The vault is required and watched by default. The two flags are independent.
   does not resolve all still fail the source.
 - `.reload_on_change(false)` removes the KDBX path from `Source::watch_paths` for this source
   only. A poll therefore cannot observe a replacement or an appearance *on this source's account*,
-  while `Reload::refresh()` still loads the vault. A change in any other watched path still loads
-  every source, including this vault, and the path stays watched if another source reports it. If
-  no source reports a path, `Reload::start_watching` returns `WatchError::NoWatchableSources`. A
-  credential-only change is never observable through the watcher; call `Reload::refresh()` after
-  rotating a credential.
+  while `Reload::refresh()` still loads the vault. Any poll that performs a load for another
+  reason — a change in another watched path, a watched path that cannot be fingerprinted, or a
+  pending failure being retried — loads every source, including this vault, and the path stays
+  watched if another source reports it. If no source reports a path,
+  `Reload::start_watching` returns `WatchError::NoWatchableSources`. A credential-only change
+  triggers no poll of its own; call `Reload::refresh()` after rotating a credential. A poll that
+  loads for another reason calls the factory again, so it can pick up the new credentials too.
 
 An optional vault that is absent may appear later, and a watched optional vault that disappears is
 a change: the next successful refresh drops the values it contributed. A path that is absent is not
@@ -226,8 +229,8 @@ A failed reload, from a torn write, a replaced file, wrong credentials, or an ex
 not publish anything: the previous good snapshot stays current, `Reload::last_error` reports the
 sanitized failure, and a pending failure is retried on the next poll. The credential factory is
 called again on that retry, so a transient secret-store failure can recover without touching the
-file. That pending-failure retry is the only case where a poll over unchanged bytes calls the
-factory; a successful poll does not.
+file. Any other load, whatever triggered it, also reads the vault and calls the factory again over
+unchanged bytes; a poll that loads nothing does not.
 
 The watcher is a polling watcher, not an OS notification API. It fingerprints the KDBX path by
 streaming the file in fixed-size chunks, so its memory use is bounded by one chunk rather than the

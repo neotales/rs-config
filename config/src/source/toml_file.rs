@@ -123,10 +123,10 @@ impl TomlFile {
     ///
     /// The default is `true`. With `false`, [`Source::watch_paths`] returns an empty list for this
     /// source, so a poll does not watch the file on this source's account. That removes **only this
-    /// source's contribution** to the watched path list: a change in any other watched path still
-    /// loads every source, including this one, and a manual `Reload::refresh` always loads every
-    /// source. If another source reports the same path, the path stays watched and a change to it
-    /// is observed. If no source reports a path at all, `Reload::start_watching` returns
+    /// source's contribution** to the watched path list: a poll that loads for any other reason
+    /// still loads every source, including this one, and a manual `Reload::refresh` always loads
+    /// every source. If another source reports the same path, the path stays watched and a change
+    /// to it is observed. If no source reports a path at all, `Reload::start_watching` returns
     /// `WatchError::NoWatchableSources`.
     ///
     /// This setting is independent of [`Self::optional`]: it changes what is observed, not whether
