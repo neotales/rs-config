@@ -36,9 +36,21 @@
 //!   whole file is still read on every poll, so cost follows the total watched size, not the size
 //!   of a change. A large file watched at a short interval is expensive. The fingerprint imposes no
 //!   parser's or provider's read limit; those apply when a source loads.
-//! - Only the paths a source reports are observed. A source whose contents also depend on
+//! - Only the paths a source reports are observed. The observed list is the union of what every
+//!   registered source reports, so two sources may name the same path and it is polled once. A
+//!   change in any watched path reloads **every** source, not only the one that reported it, which
+//!   is why [`crate::Source::watch_paths`] and the providers' `reload_on_change` switch only
+//!   remove one source's contribution to that list. A source whose contents also depend on
 //!   something else, such as a credential store, does not report a change in that input, so a poll
 //!   leaves the published snapshot alone. Call [`Reload::refresh`] after changing it.
+//! - An absent path, an unreadable path, and a readable file are distinct observations. Only an
+//!   actual [`std::io::ErrorKind::NotFound`] counts as absent, which is the one case an optional
+//!   source accepts as missing. A path that exists but cannot be fingerprinted (a directory, a
+//!   permission failure, a path whose parent is not a directory, a read that fails part way) has
+//!   unknown contents: a poll attempts a load instead of comparing the fingerprint, so the
+//!   source's own failure is reported rather than the poll silently reporting
+//!   [`RefreshOutcome::Unchanged`]. That attempt is bounded by the polling interval, not a spin
+//!   loop, and the previous good snapshot stays published.
 //! - A write in progress can be observed as a partial document. The refresh fails safely, the
 //!   previous good snapshot stays published, [`Reload::last_error`] reports the failure, and the
 //!   next poll retries even when the file's bytes did not change. Write a temporary file and
@@ -54,8 +66,8 @@
 //!   size or the modification time is still detected.
 //! - A source that reads no stable local file reports no path. Watching such a source has nothing
 //!   to observe; use [`Reload::refresh`] when the caller knows its input changed. A file source
-//!   with `reload_on_change(false)` reports no path for the same reason, even though
-//!   [`Reload::refresh`] still loads it.
+//!   with `reload_on_change(false)` contributes no path for the same reason, even though
+//!   [`Reload::refresh`] still loads it and any other watched change loads it too.
 //!
 //! # Lifecycle and shutdown
 //!
@@ -141,10 +153,11 @@ use crate::{
 
 /// The result of one refresh attempt.
 ///
-/// `Unchanged` means every source loaded and the merged value tree, including its provenance,
-/// matched the currently published snapshot. `Reloaded` means a new snapshot was published.
-/// `Failed` means a source could not be read, parsed, or represented; the previously published
-/// snapshot is still current.
+/// `Unchanged` means no new snapshot was published: either every source loaded and the merged
+/// value tree, including its provenance, matched the currently published snapshot, or
+/// [`Reload::refresh_if_changed`] found nothing to observe. `Reloaded` means a new snapshot was
+/// published. `Failed` means a source could not be read, parsed, or represented; the previously
+/// published snapshot is still current.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RefreshOutcome {
     /// The sources loaded, but produced the snapshot that is already published.
@@ -262,9 +275,9 @@ impl Reload {
     ///
     /// This does not consult the watched-file baseline; use [`Reload::refresh_if_changed`] for
     /// that. Every source is loaded, including a file source whose `reload_on_change` is `false`
-    /// and a source that reports no path at all. Concurrent calls are serialized. A successful
-    /// load that produces an identical value tree and provenance returns
-    /// [`RefreshOutcome::Unchanged`] and does not notify subscribers.
+    /// and a source that reports no path at all, whether or not the watched path list is empty.
+    /// Concurrent calls are serialized. A successful load that produces an identical value tree
+    /// and provenance returns [`RefreshOutcome::Unchanged`] and does not notify subscribers.
     ///
     /// # Errors
     ///
@@ -280,12 +293,27 @@ impl Reload {
     ///
     /// This is the polling primitive: it fingerprints the watched files, compares the result with
     /// the contents observed by the previous successful refresh, poll or initial load, and
-    /// otherwise behaves like [`Reload::refresh`]. With no watched files it always returns
-    /// [`RefreshOutcome::Unchanged`], because nothing observable can change; that includes a
-    /// failure left pending by an earlier manual refresh, which needs [`Reload::refresh`] to
-    /// retry. Only the paths a source reports are observed; a file source with
-    /// `reload_on_change(false)` reports none, and a change in another input, such as a credential
-    /// store, is invisible here. Both need [`Reload::refresh`].
+    /// otherwise behaves like [`Reload::refresh`]. A load it starts reads **every** source,
+    /// including one whose `reload_on_change` is `false`, because a change in any watched path can
+    /// affect the merged snapshot. The watched list is a union: two sources may report the same
+    /// path, and turning change watching off for one of them leaves the path watched when another
+    /// source reports it.
+    ///
+    /// With no watched files it always returns [`RefreshOutcome::Unchanged`], because nothing
+    /// observable can change; that includes a failure left pending by an earlier manual refresh,
+    /// which needs [`Reload::refresh`] to retry. A change in an input that is not a watched path,
+    /// such as a credential store, is invisible here and needs [`Reload::refresh`]. A file source
+    /// with `reload_on_change(false)` contributes no path, but any poll that another watched path
+    /// starts still loads it, so only a configuration with no watched path at all needs the manual
+    /// call for it.
+    ///
+    /// A watched path that is absent is not the same observation as one that exists but cannot be
+    /// fingerprinted. Only an actual [`std::io::ErrorKind::NotFound`] counts as absent; a directory
+    /// at the path, a permission failure, a parent that is not a directory, and a read error are
+    /// unknown contents. While a watched path is in that state this method attempts a load rather
+    /// than treating it as unchanged, so the source's failure is reported and the previous snapshot
+    /// stays published. When the path becomes readable again, the next call loads and publishes a
+    /// snapshot for the new contents.
     ///
     /// A failed reload stays pending until a later refresh succeeds. While it is pending, this
     /// method retries the load even if no watched file changed, so a transient failure in another
@@ -672,7 +700,13 @@ impl Inner {
         // A failed reload leaves `pending` set. Retry it even when no watched byte changed: the
         // failure may belong to another source, or to a torn read that does not alter the
         // fingerprint. The caller's polling interval bounds the retry rate.
-        if only_if_changed && !state.pending && state.observed == observed {
+        //
+        // An unreadable watched path is never "unchanged": its contents are unknown, so comparing
+        // it with the previous observation would hide a source that now fails. The load itself must
+        // decide. `unknown` is checked before the comparison so this stays true even when the
+        // previous observation is also unreadable.
+        if only_if_changed && !state.pending && !observed.is_unknown() && state.observed == observed
+        {
             return RefreshOutcome::Unchanged;
         }
 
@@ -774,14 +808,19 @@ impl StopFlag {
     }
 }
 
-/// One digest per watched path, in the same order as the path list.
+/// One observation per watched path, in the same order as the path list.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Fingerprints(Vec<Fingerprint>);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Fingerprint {
-    /// The path could not be read: absent, unreadable, or replaced by a directory.
-    Missing,
+    /// The path does not exist: opening it reported [`io::ErrorKind::NotFound`]. This is the one
+    /// state an optional source accepts as missing, so it can be compared safely.
+    Absent,
+    /// The path exists but could not be fingerprinted, or was read only partly: a directory at the
+    /// path, a permission failure, a parent that is not a directory, or a read error. The contents
+    /// are unknown, so this observation never proves that the path is unchanged.
+    Unreadable,
     /// The contents, reduced to a process-local digest. The bytes are not retained.
     Present(u64),
 }
@@ -790,16 +829,28 @@ impl Fingerprints {
     pub(crate) fn capture(paths: &[PathBuf]) -> Self {
         Self(paths.iter().map(|path| Fingerprint::of(path)).collect())
     }
+
+    /// Whether any watched path exists but could not be read.
+    ///
+    /// Such a path is not a stable observation: its contents, and therefore a source's success,
+    /// can differ from the previous poll without any comparable fingerprint changing. A poll must
+    /// load instead of calling it unchanged.
+    fn is_unknown(&self) -> bool {
+        self.0.contains(&Fingerprint::Unreadable)
+    }
 }
 
 impl Fingerprint {
     fn of(path: &Path) -> Self {
-        let Ok(file) = File::open(path) else {
-            return Self::Missing;
-        };
-        match fingerprint_reader(file) {
-            Ok(value) => Self::Present(value),
-            Err(_) => Self::Missing,
+        // The open and read results decide. There is no existence check that a file could appear or
+        // vanish between, and only NotFound is an absence.
+        match File::open(path) {
+            Ok(file) => match fingerprint_reader(file) {
+                Ok(value) => Self::Present(value),
+                Err(_) => Self::Unreadable,
+            },
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Self::Absent,
+            Err(_) => Self::Unreadable,
         }
     }
 }
@@ -892,7 +943,7 @@ mod tests {
         time::Duration,
     };
 
-    use crate::{Builder, SourceError, Value};
+    use crate::{Builder, RefreshOutcome, SourceError, Value};
 
     const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -1045,23 +1096,133 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_path_a_directory_and_a_present_empty_file_are_distinct() {
+    fn a_poll_attempts_a_load_while_a_watched_path_is_unreadable() {
+        // A source that reports a path but does not read it in `load`. That is the shape that
+        // isolates the fingerprint decision: the path's contents cannot be compared, so only the
+        // load may decide whether the source still works.
+        struct PathSource {
+            path: std::path::PathBuf,
+            failing: Arc<std::sync::atomic::AtomicBool>,
+            loads: Arc<AtomicI64>,
+            value: Arc<AtomicI64>,
+        }
+
+        impl crate::Source for PathSource {
+            fn load(&self) -> Result<Value, SourceError> {
+                self.loads.fetch_add(1, Ordering::SeqCst);
+                if self.failing.load(Ordering::SeqCst) {
+                    return Err(SourceError::unavailable());
+                }
+                Ok(value(self.value.load(Ordering::SeqCst)))
+            }
+
+            fn watch_paths(&self) -> Vec<std::path::PathBuf> {
+                vec![self.path.clone()]
+            }
+        }
+
         let directory = tempfile::tempdir().expect("a temporary directory");
-        let missing = directory.path().join("absent");
+        let path = directory.path().join("watched");
+        // A directory is an existing, unreadable watched path: not an absence.
+        std::fs::create_dir(&path).expect("the directory fixture is creatable");
+
+        let failing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let loads = Arc::new(AtomicI64::new(0));
+        let source_value = Arc::new(AtomicI64::new(1));
+        let reload = Builder::new()
+            .source(
+                "path",
+                PathSource {
+                    path: path.clone(),
+                    failing: Arc::clone(&failing),
+                    loads: Arc::clone(&loads),
+                    value: Arc::clone(&source_value),
+                },
+            )
+            .build_reloadable()
+            .expect("the source loads even though the watched path is unreadable");
+
+        // The previous successful observation is unreadable, which is exactly the state that a
+        // naive fingerprint comparison would call unchanged forever.
+        assert_eq!(reload.refresh_if_changed(), RefreshOutcome::Unchanged);
+        assert_eq!(
+            loads.load(Ordering::SeqCst),
+            2,
+            "the poll loaded the source"
+        );
+
+        failing.store(true, Ordering::SeqCst);
+        let outcome = reload.refresh_if_changed();
+        assert!(
+            outcome.is_failed(),
+            "an unreadable watched path must not suppress the load: {outcome:?}"
+        );
+        assert_eq!(loads.load(Ordering::SeqCst), 3);
+        assert!(reload.last_error().is_some());
+
+        // The failure stays pending, and the unreadable observation keeps forcing a load even
+        // after a failure is cleared by a successful one.
+        failing.store(false, Ordering::SeqCst);
+        assert_eq!(reload.refresh_if_changed(), RefreshOutcome::Unchanged);
+        assert_eq!(loads.load(Ordering::SeqCst), 4);
+        assert!(reload.last_error().is_none());
+
+        // Recovery: a readable path is a comparable observation again, and a new value publishes.
+        std::fs::remove_dir(&path).expect("the directory fixture is removable");
+        std::fs::write(&path, b"present").expect("the replacement is writable");
+        source_value.store(2, Ordering::SeqCst);
+        let outcome = reload.refresh_if_changed();
+        assert!(outcome.is_reloaded(), "{outcome:?}");
+        assert_eq!(
+            reload
+                .config()
+                .get::<i64>("value")
+                .expect("the value reads"),
+            2
+        );
+    }
+
+    #[test]
+    fn absence_an_unreadable_path_and_a_present_empty_file_are_distinct() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let absent = directory.path().join("absent");
         let empty = directory.path().join("empty");
         std::fs::write(&empty, b"").expect("the empty fixture is writable");
+        // A regular file where a directory is needed makes every path below it non-NotFound,
+        // without depending on permissions or on the user the test runs as.
+        let not_a_directory = directory.path().join("parent");
+        std::fs::write(&not_a_directory, b"not a directory").expect("the fixture is writable");
+        let beneath_a_file = not_a_directory.join("child");
 
         assert_eq!(
-            super::Fingerprint::of(&missing),
-            super::Fingerprint::Missing
+            super::Fingerprint::of(&absent),
+            super::Fingerprint::Absent,
+            "only a real not-found is an absence"
+        );
+        let unreadable_directory = super::Fingerprint::of(directory.path());
+        assert_eq!(
+            unreadable_directory,
+            super::Fingerprint::Unreadable,
+            "a directory is not an absence and is not a readable watched file"
         );
         assert_eq!(
-            super::Fingerprint::of(directory.path()),
-            super::Fingerprint::Missing,
-            "a directory is not a readable watched file"
+            super::Fingerprint::of(&beneath_a_file),
+            super::Fingerprint::Unreadable,
+            "a non-directory parent is an unreadable path, not an absent one"
         );
+        assert_ne!(unreadable_directory, super::Fingerprint::Absent);
+        assert!(
+            super::Fingerprints::capture(&[absent, beneath_a_file]).is_unknown(),
+            "a capture that holds an unreadable path must force a load"
+        );
+
         let present = super::Fingerprint::of(&empty);
-        assert_ne!(present, super::Fingerprint::Missing);
         assert_eq!(present, super::Fingerprint::of(&empty));
+        assert_ne!(present, super::Fingerprint::Absent);
+        assert_ne!(present, super::Fingerprint::Unreadable);
+        assert!(
+            !super::Fingerprints::capture(&[empty]).is_unknown(),
+            "a readable file is a comparable observation"
+        );
     }
 }

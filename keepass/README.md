@@ -124,10 +124,10 @@ configured delimiter splits.
 `CredentialFactory` is the only credential path. Implement it, or pass a closure of type
 `Fn() -> Result<KdbxCredentials, SourceError> + Send + Sync`. The provider calls it **at most once
 per load**, after the mappings validate and the file opens successfully: the initial build, every
-`Reload::refresh`, and a watcher pass that actually loads because a watched file changed or an
-earlier load failed. A watcher pass over unchanged files does not load and does not call the
-factory, and a load that fails validation or cannot open the file calls it zero times. The returned
-credentials are dropped after that load.
+`Reload::refresh`, and a watcher pass that actually loads because a watched file changed, a watched
+path could not be read, or an earlier load failed. A watcher pass over unchanged files does not
+load and does not call the factory, and a load that fails validation or cannot open the file calls
+it zero times. The returned credentials are dropped after that load.
 
 The watcher fingerprints only the KDBX path. If only the credential source changes, the file
 fingerprint is unchanged and the watcher does not reload; call `Reload::refresh()` yourself after
@@ -150,15 +150,21 @@ The vault is required and watched by default. The two flags are independent.
   absent optional vault, because no file was opened. A path that is a directory, a permission
   failure, a corrupt or truncated document, wrong credentials, an exceeded limit, and a mapping that
   does not resolve all still fail the source.
-- `.reload_on_change(false)` removes the KDBX path from `Source::watch_paths`. A poll therefore
-  cannot observe a replacement or an appearance, while `Reload::refresh()` still loads the vault.
-  If no source reports a path, `Reload::start_watching` returns `WatchError::NoWatchableSources`.
-  A credential-only change is never observable through the watcher; call `Reload::refresh()` after
+- `.reload_on_change(false)` removes the KDBX path from `Source::watch_paths` for this source
+  only. A poll therefore cannot observe a replacement or an appearance *on this source's account*,
+  while `Reload::refresh()` still loads the vault. A change in any other watched path still loads
+  every source, including this vault, and the path stays watched if another source reports it. If
+  no source reports a path, `Reload::start_watching` returns `WatchError::NoWatchableSources`. A
+  credential-only change is never observable through the watcher; call `Reload::refresh()` after
   rotating a credential.
 
 An optional vault that is absent may appear later, and a watched optional vault that disappears is
-a change: the next successful refresh drops the values it contributed. A corrupt replacement or
-wrong credentials is not an absence; that refresh fails and keeps the previous good snapshot.
+a change: the next successful refresh drops the values it contributed. A path that is absent is not
+the same observation as one that exists but cannot be read: a directory at the path, a permission
+failure, and a path whose parent is not a directory make a poll attempt the load and report the
+failure instead of treating the vault as unchanged; the previous snapshot stays published and the
+retry is bounded by the polling interval. A corrupt replacement or wrong credentials is not an
+absence; that refresh fails and keeps the previous good snapshot.
 
 ### Read limits
 

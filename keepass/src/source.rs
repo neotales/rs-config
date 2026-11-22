@@ -25,11 +25,12 @@ const SUPPORTED_DELIMITERS: [char; 5] = ['.', ':', '/', ',', '|'];
 /// The provider calls [`CredentialFactory::credentials`] at most once for every **load**, after
 /// the mappings validate and the file opens successfully. A load is the initial build, every
 /// manual `neotales_config::Reload::refresh`, and a polling pass that actually loads because a
-/// watched file changed or an earlier load failed. A polling pass over unchanged files does not
-/// load and does not call the factory, and a load that fails validation or cannot open the file
-/// calls it zero times. The reload watcher fingerprints only the KDBX path, so a change in the
-/// credential source alone is invisible to it; call `neotales_config::Reload::refresh` after
-/// rotating a credential. The returned credentials are dropped after that one load.
+/// watched file changed, a watched path could not be read, or an earlier load failed. A polling
+/// pass over unchanged files does not load and does not call the factory, and a load that fails
+/// validation or cannot open the file calls it zero times. The reload watcher fingerprints only
+/// the KDBX path, so a change in the credential source alone is invisible to it; call
+/// `neotales_config::Reload::refresh` after rotating a credential. The returned credentials are
+/// dropped after that one load.
 ///
 /// The factory is the only credential path. The provider never reads a password itself, never
 /// opens a key file, never discovers a vault, and never prompts. Implement the factory with a value
@@ -93,9 +94,14 @@ where
 /// By default the vault is required and its path is watched. [`Self::optional`] and
 /// [`Self::reload_on_change`] change those two defaults independently. An optional vault that is
 /// absent is an empty map, and the credential factory is not called because no file was opened. A
-/// path that is a directory, a permission failure, a corrupt or truncated document, wrong
-/// credentials, an exceeded limit, and a mapping that does not resolve all still reject the
-/// source. The open result itself decides absence: there is no separate existence check.
+/// source with change watching off removes only its own contribution to the watched path list; a
+/// poll loads every source when any watched path changes, and the path stays watched if another
+/// source reports it. A path that is a directory, a permission failure, a corrupt or truncated
+/// document, wrong credentials, an exceeded limit, and a mapping that does not resolve all still
+/// reject the source. The open result itself decides absence: there is no separate existence
+/// check. An absent optional vault is not the same observation as an unreadable one, so a poll
+/// attempts a load when the path exists but cannot be read and reports the failure rather than
+/// assuming the vault is unchanged.
 ///
 /// # Configuration validation
 ///
@@ -233,9 +239,12 @@ impl KeePassFile {
     /// Reports the KDBX path to the polling watcher.
     ///
     /// The default is `true`. With `false`, [`Source::watch_paths`] returns an empty list for this
-    /// source, so `Reload::refresh_if_changed` and `Reload::start_watching` do not poll the vault;
-    /// `Reload::refresh` still loads every source, including this one. If no source reports a path,
-    /// `Reload::start_watching` returns `WatchError::NoWatchableSources`.
+    /// source, so a poll does not watch the vault on this source's account. That removes **only
+    /// this source's contribution** to the watched path list: a change in any other watched path
+    /// still loads every source, including this one, and a manual `Reload::refresh` always loads
+    /// every source. If another source reports the same path, the path stays watched and a change
+    /// to it is observed. If no source reports a path at all, `Reload::start_watching` returns
+    /// `WatchError::NoWatchableSources`.
     ///
     /// This setting is independent of [`Self::optional`]: it changes what is observed, not whether
     /// an absent vault is accepted. A change in the credential source is never observable here;

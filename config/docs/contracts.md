@@ -17,8 +17,10 @@ which depends on the core and is released at the same version.
   replaced file; `Builder::build` performs exactly one load. `Builder::build_reloadable` performs
   one initial load and loads every source again on each `Reload::refresh`.
 - `Source::watch_paths` reports stable local files whose contents decide `Source::load`. Its default
-  is empty. Every file provider returns its configured path, including `DotenvFile`. Paths are used
-  only for change detection and never reach an error or a public `Debug` output.
+  is empty. Every file provider returns its configured path, including `DotenvFile`. The reported
+  lists are combined into one watched list: a change in any watched path reloads every source, and
+  a path reported by more than one source is watched once. Paths are used only for change detection
+  and never reach an error or a public `Debug` output.
 - A source reports failure with `SourceError`, which carries `Unavailable`, `Invalid`, or
   `Unrepresentable` and no message. The builder adds the registered source name and never forwards
   source text. `Unrepresentable` becomes `Error::is_unrepresentable`; the other two become a
@@ -179,10 +181,13 @@ defaults preserve the prior behavior.
   disappears is a change the next successful refresh publishes: the values it contributed are
   dropped and an earlier source's value and origin show through in the same snapshot. A parse
   failure is not an absence; it fails the refresh and keeps the previous snapshot published.
-- `.reload_on_change(false)` removes the source's path from `Source::watch_paths`. A poll
-  (`refresh_if_changed`, or the explicit watcher) therefore cannot observe the file, though a load
-  started for another reason reads it. `Reload::refresh` always loads every source. If no source
-  reports a path, `Reload::start_watching` returns `WatchError::NoWatchableSources`.
+- `.reload_on_change(false)` removes only that source's contribution to the watched path list.
+  A poll therefore cannot observe the file on that source's account, but a load started for any
+  other reason loads every source, so a value from the file can still appear in the published
+  snapshot. `Reload::refresh` always loads every source. The watched list is the union of what the
+  sources report: two sources may name the same path, and it stays watched while either reports
+  it, so turning watching off for one of them does not remove the path. If no source reports a
+  path, `Reload::start_watching` returns `WatchError::NoWatchableSources`.
 
 File-format keys are literal and hierarchical exactly as the document wrote them. The builder's
 delimiter is not applied as a key separator: a dotted key in a document is one key, not a nested
@@ -277,9 +282,18 @@ The `reload` feature is code only: it adds no dependency and starts no thread by
   path, and its source chain stays empty.
 - `Reload::refresh_if_changed` fingerprints the watched paths before the load. Fingerprints are a
   digest of file contents, not a timestamp, so a replacement that preserves size or modification
-  time is still detected. Missing, unreadable, and recreated paths are distinct from a present
-  file, so deletion and recovery are observed. A change that produces byte-identical contents is
-  not a change, because the snapshot would be identical.
+  time is still detected. An absent path, a path that exists but cannot be read, and a readable
+  file are three distinct observations, so deletion, unreadability, and recovery are each observed.
+  Only an actual `io::ErrorKind::NotFound` is an absence. A path that exists but cannot be
+  fingerprinted (a directory at the path, a permission failure, a parent that is not a directory,
+  a read error) has unknown contents, so a poll attempts a load instead of comparing it: the
+  source's failure is reported and the previous snapshot stays published, rather than the poll
+  reporting `Unchanged`. That attempt is bounded by the caller's polling interval, not a spin loop.
+  A change that produces byte-identical contents is not a change, because the snapshot would be
+  identical.
+- A poll that does load loads **every** source, not only the source that reported the changed
+  path, because a change in one source can be shadowed by, or reveal, a value from another. This is
+  why `reload_on_change(false)` only removes a source's contribution to the watched list.
 - The observed fingerprint advances only when a load succeeds. A failed load leaves it unchanged and
   marks the reload pending, so the next poll retries even when the watched bytes and metadata did
   not change. That covers a torn read and another source that was transiently unavailable. Retry is
@@ -305,9 +319,11 @@ The `reload` feature is code only: it adds no dependency and starts no thread by
   cost follow total watched size. The fingerprint is independent of any provider's read limit;
   that limit applies when the source loads.
 - Change detection covers only the paths a source reports through `Source::watch_paths`. A file
-  provider with `reload_on_change(false)` reports none, and an input that is not one of those files
-  (for example a credential store) is invisible to polling; call `Reload::refresh` after it
-  changes. A poll that does load reads every source, including one whose change watching is off.
+  provider with `reload_on_change(false)` contributes none for that source, and an input that is not
+  one of those files (for example a credential store) is invisible to polling; call
+  `Reload::refresh` after it changes. A poll that does load reads every source, including one whose
+  change watching is off, and the watched list is the union across sources, so a path reported by
+  another source stays watched.
 - A partially written file safely fails and is retried on the next poll even without a content
   change; an atomic rename is still the recommended write pattern.
 - A published snapshot holds merged values in plaintext. Only the newest snapshot is held by the

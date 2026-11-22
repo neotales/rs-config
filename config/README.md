@@ -325,9 +325,12 @@ reject the source. The open result itself decides, so there is no existence chec
 appear or vanish between it and the read. An optional file that is absent may appear later.
 
 Every file provider, including `DotenvFile`, also reports its path to the polling watcher by
-default. `.reload_on_change(false)` keeps that path out of `Source::watch_paths`, so
-`refresh_if_changed` and `start_watching` ignore the file while `refresh()` still reloads it. The
-two flags are independent, and both defaults keep the behavior described below unchanged.
+default. `.reload_on_change(false)` keeps that path out of `Source::watch_paths` for that source
+only, so `refresh_if_changed` and `start_watching` do not poll the file on its account. It does not
+make the source private: a poll that loads because any other watched path changed loads every
+source, including this one, and `refresh()` always reloads everything. A path another source
+reports stays watched, so two sources over one file do not need both flags on. The two flags are
+independent, and both defaults keep the behavior described below unchanged.
 
 ```rust,no_run
 use neotales_config::{Builder, JsonFile};
@@ -408,11 +411,17 @@ watcher.stop();
 
 Every file provider, including `DotenvFile`, reports its path through `Source::watch_paths` by
 default; a custom source can report its own stable files or return an empty list, and
-`reload_on_change(false)` removes one file provider's path. An optional watched file that
-disappears is a change: the next successful refresh drops the values it contributed and an earlier
-source's value shows through. A required watched file that disappears fails the refresh and keeps
-the last good snapshot, like any other load failure. A parse failure is never a disappearance. A
-source with `reload_on_change(false)` contributes no path, so only `refresh()` sees it change.
+`reload_on_change(false)` removes only that one file provider's contribution to the watched list.
+A change in any watched path reloads every source, not only the one that reported it, so a source
+with the flag off is still reloaded by a poll triggered elsewhere; a path two sources share stays
+watched while either reports it, and `refresh()` always reloads everything. An optional watched
+file that disappears is a change: the next successful refresh drops the values it contributed and
+an earlier source's value shows through. A required watched file that disappears fails the refresh
+and keeps the last good snapshot, like any other load failure. A parse failure is never a
+disappearance. A watched path that exists but cannot be read (a directory at the path, a
+permission failure, a parent that is not a directory) is not an absence either: a poll attempts the
+load, reports the failure, and keeps the last good snapshot, so an unreadable file never looks
+unchanged.
 Polling fingerprints each
 watched file by streaming it in fixed-size chunks, so its memory use is bounded by a chunk rather
 than the file size. It still reads every byte, so a short interval over a large file costs real

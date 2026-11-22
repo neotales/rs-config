@@ -57,9 +57,10 @@
 //! by default. `optional(true)` on the provider changes only the first: an actual not-found when
 //! the path is opened becomes an empty source, while a directory, a permission failure, a
 //! non-UTF-8 document, and a parse failure still fail the source. `reload_on_change(false)`
-//! changes only the second: the path is not reported to the polling watcher, so a manual
-//! `Reload::refresh` still loads the source but a poll does not. The two flags are independent,
-//! and both defaults keep the pre-existing behavior.
+//! changes only the second, and only for that source: the path is not reported to the polling
+//! watcher on its account, so a manual `Reload::refresh` still loads the source. A poll triggered
+//! by any other watched path also loads every source, and a path another source reports stays
+//! watched. The two flags are independent, and both defaults keep the pre-existing behavior.
 //!
 #![cfg_attr(
     feature = "reload",

@@ -47,10 +47,12 @@
 //!   reject the source. The default is `false`: the vault is required.
 //! - [`Source::watch_paths`](neotales_config::Source::watch_paths) reports the KDBX path even when
 //!   the file does not exist yet. [`KeePassFile::reload_on_change`] with `false` keeps the path out
-//!   of the polling watcher; a manual `neotales_config::Reload::refresh` still loads the vault. The
-//!   default is `true`. With the core `reload` feature, the explicit polling watcher therefore
-//!   notices a replacement and a failed reload leaves the previous good snapshot in place. This
-//!   crate's own `reload` feature only forwards that core feature.
+//!   of the polling watcher on this source's account only: a poll that loads because another
+//!   watched path changed still loads the vault, and a manual `neotales_config::Reload::refresh`
+//!   always loads it. The path stays watched if another source reports it. The default is `true`.
+//!   With the core `reload` feature, the explicit polling watcher therefore notices a replacement
+//!   and a failed reload leaves the previous good snapshot in place. This crate's own `reload`
+//!   feature only forwards that core feature.
 //!
 //! # Field presence
 //!

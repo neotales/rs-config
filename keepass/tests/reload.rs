@@ -328,6 +328,90 @@ fn an_absent_optional_vault_appears_and_disappears_in_a_poll() {
 }
 
 #[test]
+fn an_absent_optional_vault_replaced_by_a_directory_fails_and_recovers() {
+    let fixture = Fixture::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    std::fs::remove_file(fixture.path()).expect("the fixture vault is removable");
+
+    let reload = Builder::new()
+        .source(
+            "vault",
+            support::provider(&fixture, Arc::clone(&calls)).optional(true),
+        )
+        .build_reloadable()
+        .expect("an absent optional vault builds");
+    assert_eq!(reload.refresh_if_changed(), RefreshOutcome::Unchanged);
+
+    // A directory at the KDBX path is not an absence. The optional flag accepts only a real
+    // not-found, so a poll must attempt the load and report the failure instead of treating the
+    // path as an unchanged missing vault.
+    std::fs::create_dir(fixture.path()).expect("the directory fixture is creatable");
+    let outcome = reload.refresh_if_changed();
+    assert!(outcome.is_failed(), "{outcome:?}");
+    assert_eq!(
+        outcome
+            .error()
+            .and_then(neotales_config::Error::source_kind),
+        Some(SourceErrorKind::Unavailable)
+    );
+    assert!(
+        !reload.config().has("app.token").expect("the path is valid"),
+        "the previous snapshot stays published"
+    );
+
+    // The unreadable path is retried on the next poll, not reported as unchanged.
+    assert!(reload.refresh_if_changed().is_failed());
+
+    // Recovery: a real vault replaces the directory and its mapped value is published.
+    std::fs::remove_dir(fixture.path()).expect("the directory fixture is removable");
+    fixture.write(TOKEN_A, TOKEN_B);
+    let outcome = reload.refresh_if_changed();
+    assert!(outcome.is_reloaded(), "{outcome:?}");
+    assert!(reload.last_error().is_none());
+    assert_eq!(
+        reload.config().get::<String>("app.token").expect("mapped"),
+        TOKEN_A
+    );
+    assert!(
+        calls.load(Ordering::SeqCst) >= 1,
+        "the recovered vault opened and called the factory"
+    );
+}
+
+#[test]
+fn a_vault_path_shared_by_two_sources_stays_watched_when_one_turns_it_off() {
+    let fixture = Fixture::new();
+    let reload = Builder::new()
+        .source(
+            "primary",
+            support::provider(&fixture, Arc::new(AtomicUsize::new(0))).reload_on_change(false),
+        )
+        .source(
+            "secondary",
+            support::provider(&fixture, Arc::new(AtomicUsize::new(0))),
+        )
+        .build_reloadable()
+        .expect("the initial load succeeds");
+    assert_eq!(
+        reload.watched_path_count(),
+        1,
+        "the shared KDBX path is watched once"
+    );
+
+    // The path is still observed through the second source, so the poll loads both: the value
+    // comes from the source that would have been unwatched on its own.
+    fixture.write(TOKEN_CHANGED, TOKEN_B);
+    let outcome = reload.refresh_if_changed();
+    assert!(outcome.is_reloaded(), "{outcome:?}");
+    let config = reload.config();
+    assert_eq!(
+        config.get::<String>("app.token").expect("mapped"),
+        TOKEN_CHANGED
+    );
+    assert_eq!(config.origin("app.token").expect("mapped"), "secondary");
+}
+
+#[test]
 fn change_watching_off_needs_a_manual_refresh() {
     let fixture = Fixture::new();
     let calls = Arc::new(AtomicUsize::new(0));

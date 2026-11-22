@@ -6,9 +6,19 @@
 
 #![cfg(all(feature = "reload", feature = "toml"))]
 
-use std::{fs, path::PathBuf, time::Duration};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
-use neotales_config::{Builder, RefreshOutcome, Reload, TomlFile, Value, WatchError};
+use neotales_config::{
+    Builder, RefreshOutcome, Reload, SourceError, SourceErrorKind, TomlFile, Value, WatchError,
+};
 
 fn fixture(text: &str) -> (tempfile::TempDir, PathBuf) {
     let directory = tempfile::tempdir().expect("a temporary directory");
@@ -114,6 +124,178 @@ fn change_watching_off_is_not_polled_but_manual_refresh_still_loads() {
     // A manual refresh loads every source, including the one whose change watch is off.
     assert_eq!(reload.refresh(), RefreshOutcome::Reloaded);
     assert_eq!(reload.config().get::<i64>("probe").unwrap(), 9090);
+}
+
+#[test]
+fn an_absent_optional_file_replaced_by_a_directory_fails_and_recovers() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let path = directory.path().join("app.toml");
+
+    let reload = reload(&path);
+    assert_eq!(
+        reload.refresh_if_changed(),
+        RefreshOutcome::Unchanged,
+        "an absent optional file at the baseline is a stable observation"
+    );
+    assert!(!reload.config().has("probe").unwrap());
+
+    // A directory at the watched path is not an absence. The optional flag accepts only a real
+    // not-found, so a poll must load and report the failure instead of comparing the path with the
+    // absent baseline and reporting Unchanged.
+    fs::create_dir(&path).expect("the directory fixture is creatable");
+    let outcome = reload.refresh_if_changed();
+    assert!(outcome.is_failed(), "{outcome:?}");
+    assert_eq!(
+        outcome
+            .error()
+            .and_then(neotales_config::Error::source_kind),
+        Some(SourceErrorKind::Unavailable)
+    );
+    assert!(!reload.config().has("probe").unwrap());
+
+    // The failure is retried on every poll even though the watched fingerprint cannot change, so a
+    // persistently unreadable path can never be mistaken for an unchanged one. Retry is bounded by
+    // the caller's interval, not a loop inside a call.
+    assert!(reload.refresh_if_changed().is_failed());
+    assert!(reload.refresh_if_changed().is_failed());
+
+    // The diagnostic stays sanitized: no path and no document text.
+    let reported = format!("{:?}", reload.last_error());
+    assert!(!reported.contains("app.toml"), "{reported}");
+    assert!(
+        !reported.contains(&*directory.path().to_string_lossy()),
+        "{reported}"
+    );
+    assert!(!reported.contains("probe"), "{reported}");
+
+    // Recovery: the directory is replaced by a valid document and the next poll publishes it.
+    fs::remove_dir(&path).expect("the directory fixture is removable");
+    fs::write(&path, "probe = 7\n").expect("the replacement is writable");
+    let outcome = reload.refresh_if_changed();
+    assert!(outcome.is_reloaded(), "{outcome:?}");
+    assert_eq!(reload.last_error(), None);
+    let config = reload.config();
+    assert_eq!(config.get::<i64>("probe").unwrap(), 7);
+    assert_eq!(config.origin("probe").unwrap(), "app");
+}
+
+#[test]
+fn an_unreadable_path_that_is_not_an_absence_forces_a_load_until_it_recovers() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let parent = directory.path().join("conf");
+    fs::create_dir(&parent).expect("the parent directory is creatable");
+    let path = parent.join("app.toml");
+
+    let reload = reload(&path);
+    assert_eq!(reload.refresh_if_changed(), RefreshOutcome::Unchanged);
+
+    // Replacing the parent with a regular file makes every path below it fail with a
+    // non-not-found error. That is not an absence the optional flag accepts, so the poll must
+    // attempt the load and report it.
+    fs::remove_dir(&parent).expect("the empty parent is removable");
+    fs::write(&parent, "not a directory").expect("the replacement is writable");
+    assert!(reload.refresh_if_changed().is_failed());
+    assert!(!reload.config().has("probe").unwrap());
+
+    // A real directory with a valid document is a recovery, and the value is published.
+    fs::remove_file(&parent).expect("the replacement file is removable");
+    fs::create_dir(&parent).expect("the parent directory is creatable again");
+    fs::write(&path, "probe = 3\n").expect("the document is writable");
+    let outcome = reload.refresh_if_changed();
+    assert!(outcome.is_reloaded(), "{outcome:?}");
+    assert_eq!(reload.last_error(), None);
+    assert_eq!(reload.config().get::<i64>("probe").unwrap(), 3);
+}
+
+#[test]
+fn a_change_in_one_watched_path_reloads_every_source() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let first = directory.path().join("first.toml");
+    let second = directory.path().join("second.toml");
+    fs::write(&first, "first = 1\n").expect("the fixture is writable");
+    fs::write(&second, "second = 1\n").expect("the fixture is writable");
+
+    // A caller source with no watched path of its own. It proves that a poll triggered by one
+    // watched file loads every source, not only the one that reported the change.
+    let loads = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&loads);
+    let reload = Builder::new()
+        .source("counting", move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, SourceError>(Value::map([("counted", Value::from(1_i64))]))
+        })
+        .toml_file("first", TomlFile::new(&first))
+        .toml_file("second", TomlFile::new(&second))
+        .build_reloadable()
+        .expect("the fixture builds");
+    assert_eq!(loads.load(Ordering::SeqCst), 1, "the initial load");
+    assert_eq!(
+        reload.watched_path_count(),
+        2,
+        "two distinct paths are watched"
+    );
+
+    // Only the first file changes, so only the first path can trigger the poll. The snapshot still
+    // has to be rebuilt from every source.
+    fs::write(&first, "first = 2\n").expect("the replacement is writable");
+    assert_eq!(reload.refresh_if_changed(), RefreshOutcome::Reloaded);
+    assert_eq!(
+        loads.load(Ordering::SeqCst),
+        2,
+        "a poll for one watched path must load every source"
+    );
+
+    let config = reload.config();
+    assert_eq!(config.get::<i64>("first").unwrap(), 2);
+    assert_eq!(config.get::<i64>("second").unwrap(), 1);
+    assert_eq!(config.origin("second").unwrap(), "second");
+    assert_eq!(config.get::<i64>("counted").unwrap(), 1);
+}
+
+#[test]
+fn a_path_shared_by_two_sources_stays_watched_when_one_turns_it_off() {
+    let (_directory, path) = fixture("probe = 1\n");
+
+    // Both sources read the same file. Disabling change watching on one removes only that source's
+    // contribution to the watched list, so the path is still watched through the other.
+    let reload = Builder::new()
+        .toml_file("primary", TomlFile::new(&path))
+        .toml_file("secondary", TomlFile::new(&path).reload_on_change(false))
+        .build_reloadable()
+        .expect("the fixture builds");
+    assert_eq!(
+        reload.watched_path_count(),
+        1,
+        "a path reported twice is watched once"
+    );
+
+    fs::write(&path, "probe = 2\n").expect("the replacement is writable");
+    assert_eq!(
+        reload.refresh_if_changed(),
+        RefreshOutcome::Reloaded,
+        "the shared path is still observed through the enabled source"
+    );
+    let config = reload.config();
+    assert_eq!(config.get::<i64>("probe").unwrap(), 2);
+    assert_eq!(
+        config.origin("probe").unwrap(),
+        "secondary",
+        "the source with watching off is still loaded by the poll"
+    );
+
+    // Only when every reporter turns it off does the path leave the watched list.
+    let disabled = Builder::new()
+        .toml_file("primary", TomlFile::new(&path).reload_on_change(false))
+        .toml_file("secondary", TomlFile::new(&path).reload_on_change(false))
+        .build_reloadable()
+        .expect("the fixture builds");
+    assert_eq!(disabled.watched_path_count(), 0);
+
+    fs::write(&path, "probe = 3\n").expect("the replacement is writable");
+    assert_eq!(disabled.refresh_if_changed(), RefreshOutcome::Unchanged);
+    assert_eq!(disabled.config().get::<i64>("probe").unwrap(), 2);
+    assert_eq!(disabled.refresh(), RefreshOutcome::Reloaded);
+    assert_eq!(disabled.config().get::<i64>("probe").unwrap(), 3);
 }
 
 #[test]

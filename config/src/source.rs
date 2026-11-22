@@ -133,6 +133,11 @@ pub trait Source: Send + Sync {
     /// changes the caller wants to observe. Watching is independent of whether a file is required
     /// or optional.
     ///
+    /// The returned lists are combined into one watched list, so this report is a contribution,
+    /// not a private subscription. A change in any watched path reloads **every** source, and two
+    /// sources may name the same path: it is polled once, and a source that stops reporting it
+    /// does not remove it while another source still reports it.
+    ///
     /// The paths are used for change detection only. They are never stored on an error, printed
     /// by a [`fmt::Debug`] implementation, or published in a snapshot, because a path can name a
     /// host or a user. A source whose content comes from somewhere a local file cannot describe

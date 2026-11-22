@@ -35,8 +35,9 @@ use super::{Source, file::read_text};
 ///
 /// By default the file is required and its path is watched. [`Self::optional`] and
 /// [`Self::reload_on_change`] change those two defaults independently: an optional source treats
-/// only a genuine not-found as an empty document, and a source with change watching off keeps its
-/// path out of the polling watcher while a manual refresh still reads it.
+/// only a genuine not-found as an empty document, and a source with change watching off removes
+/// only its own contribution to the watched path list. A poll loads every source when any watched
+/// path changes, and the path stays watched if another source reports it.
 ///
 /// Numbers are exact where the value model allows it. An integer literal is held as
 /// [`Value::Integer`] up to `i128`; a larger integer literal rejects the source instead of being
@@ -126,9 +127,12 @@ impl Json5File {
     /// Reports the configured path to the polling watcher.
     ///
     /// The default is `true`. With `false`, [`Source::watch_paths`] returns an empty list for this
-    /// source, so `Reload::refresh_if_changed` and `Reload::start_watching` do not poll the file;
-    /// `Reload::refresh` still loads every source, including this one. If no source reports a path,
-    /// `Reload::start_watching` returns `WatchError::NoWatchableSources`.
+    /// source, so a poll does not watch the file on this source's account. That removes **only this
+    /// source's contribution** to the watched path list: a change in any other watched path still
+    /// loads every source, including this one, and a manual `Reload::refresh` always loads every
+    /// source. If another source reports the same path, the path stays watched and a change to it
+    /// is observed. If no source reports a path at all, `Reload::start_watching` returns
+    /// `WatchError::NoWatchableSources`.
     ///
     /// This setting is independent of [`Self::optional`]: it changes what is observed, not whether
     /// an absent file is accepted.

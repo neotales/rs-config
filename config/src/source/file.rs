@@ -13,6 +13,10 @@ use crate::SourceError;
 /// read result itself, never from a preceding existence check, so there is no window in which a
 /// file can appear or vanish between the check and the read.
 ///
+/// The reload fingerprint draws the same line, so an optional path that exists but cannot be read
+/// is never mistaken for an absent one: the poll attempts the load and reports the failure instead
+/// of assuming the file is unchanged.
+///
 /// [`SourceError::unavailable`] carries no path, no bytes, and no operating-system message.
 pub(crate) fn read_bytes(path: &Path, optional: bool) -> Result<Option<Vec<u8>>, SourceError> {
     match std::fs::read(path) {
