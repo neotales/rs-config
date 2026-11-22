@@ -164,6 +164,26 @@ A format source reads its path again on every load, and reports that path throug
 `Source::watch_paths`. A build always performs exactly one read; the `reload` feature is what
 rebuilds the snapshot from the same sources.
 
+#### Optional files and change watching
+
+Every file provider is required and watched by default. The two flags are independent and both
+defaults preserve the prior behavior.
+
+- `.optional(true)` turns exactly one open result into an empty source: an actual
+  `io::ErrorKind::NotFound` from opening the path. A path that is a directory, a permission
+  failure, a path with a non-directory component, a non-UTF-8 document, a parse failure, a
+  non-finite or out-of-range number, and a rejected interpolation all still fail the source. The
+  decision is taken from the open and read result, never from a preceding existence check, so a
+  file cannot appear or vanish between the check and the read.
+- An optional file that is absent may appear later. With `reload`, a watched optional file that
+  disappears is a change the next successful refresh publishes: the values it contributed are
+  dropped and an earlier source's value and origin show through in the same snapshot. A parse
+  failure is not an absence; it fails the refresh and keeps the previous snapshot published.
+- `.reload_on_change(false)` removes the source's path from `Source::watch_paths`. A poll
+  (`refresh_if_changed`, or the explicit watcher) therefore cannot observe the file, though a load
+  started for another reason reads it. `Reload::refresh` always loads every source. If no source
+  reports a path, `Reload::start_watching` returns `WatchError::NoWatchableSources`.
+
 File-format keys are literal and hierarchical exactly as the document wrote them. The builder's
 delimiter is not applied as a key separator: a dotted key in a document is one key, not a nested
 path.
@@ -284,9 +304,10 @@ The `reload` feature is code only: it adds no dependency and starts no thread by
   bounded by a single chunk, not the file size, but the whole file is still read, so disk I/O and
   cost follow total watched size. The fingerprint is independent of any provider's read limit;
   that limit applies when the source loads.
-- Change detection covers only the paths a source reports through `Source::watch_paths`. An input
-  that is not one of those files (for example a credential store) is invisible to polling; call
-  `Reload::refresh` after it changes.
+- Change detection covers only the paths a source reports through `Source::watch_paths`. A file
+  provider with `reload_on_change(false)` reports none, and an input that is not one of those files
+  (for example a credential store) is invisible to polling; call `Reload::refresh` after it
+  changes. A poll that does load reads every source, including one whose change watching is off.
 - A partially written file safely fails and is retried on the next poll even without a content
   change; an atomic rename is still the recommended write pattern.
 - A published snapshot holds merged values in plaintext. Only the newest snapshot is held by the
@@ -419,3 +440,7 @@ text. `Error::source()` is always `None`, so no nested error can reintroduce tex
 | Deletion, recreation, and same-size atomic replacement | `tests/reload.rs` |
 | Explicit watcher publication, failure recovery, and shutdown | `tests/reload.rs` |
 | Dotenv path is watchable | `tests/reload.rs` |
+| Optional missing file is empty, non-not-found errors still fail | `tests/optional.rs` |
+| Change-watch flag controls the reported path per provider | `tests/optional.rs` |
+| Optional appearance, disappearance, and parse-failure preservation | `tests/optional_reload.rs` |
+| Manual refresh loads a source whose change watch is off | `tests/optional_reload.rs`, `tests/reload.rs` |

@@ -53,7 +53,13 @@
 //! registration and the delimiter were given in. File formats do not take a separator: their
 //! structure is already expressed by the document, so every key is used literally.
 //!
-//! A file source reads its path again on every load.
+//! A file source reads its path again on every load. Every file provider is required and watched
+//! by default. `optional(true)` on the provider changes only the first: an actual not-found when
+//! the path is opened becomes an empty source, while a directory, a permission failure, a
+//! non-UTF-8 document, and a parse failure still fail the source. `reload_on_change(false)`
+//! changes only the second: the path is not reported to the polling watcher, so a manual
+//! `Reload::refresh` still loads the source but a poll does not. The two flags are independent,
+//! and both defaults keep the pre-existing behavior.
 //!
 #![cfg_attr(
     feature = "reload",

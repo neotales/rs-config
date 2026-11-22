@@ -754,6 +754,210 @@ fn every_file_provider_reports_a_watched_path() {
     assert_eq!(reload.watched_path_count(), 7);
 }
 
+#[cfg(all(
+    feature = "dotenv",
+    feature = "json",
+    feature = "json5",
+    feature = "jsonc",
+    feature = "toml",
+    feature = "yaml",
+    feature = "ini"
+))]
+#[test]
+fn every_file_provider_can_be_optional_and_unwatched() {
+    use neotales_config::{
+        DotenvFile, IniFile, Json5File, JsonFile, JsoncFile, TomlFile, YamlFile,
+    };
+
+    // None of these paths exists. Every source is optional, so the initial build succeeds with an
+    // empty snapshot, and every source has change watching off, so nothing is polled.
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let reload = Builder::new()
+        .dotenv_file(
+            "dotenv",
+            DotenvFile::new(directory.path().join(".env"))
+                .optional(true)
+                .reload_on_change(false),
+        )
+        .json_file(
+            "json",
+            JsonFile::new(directory.path().join("missing.json"))
+                .optional(true)
+                .reload_on_change(false),
+        )
+        .json5_file(
+            "json5",
+            Json5File::new(directory.path().join("missing.json5"))
+                .optional(true)
+                .reload_on_change(false),
+        )
+        .jsonc_file(
+            "jsonc",
+            JsoncFile::new(directory.path().join("missing.jsonc"))
+                .optional(true)
+                .reload_on_change(false),
+        )
+        .toml_file(
+            "toml",
+            TomlFile::new(directory.path().join("missing.toml"))
+                .optional(true)
+                .reload_on_change(false),
+        )
+        .yaml_file(
+            "yaml",
+            YamlFile::new(directory.path().join("missing.yaml"))
+                .optional(true)
+                .reload_on_change(false),
+        )
+        .ini_file(
+            "ini",
+            IniFile::new(directory.path().join("missing.ini"))
+                .optional(true)
+                .reload_on_change(false),
+        )
+        .build_reloadable()
+        .expect("every absent optional file is an empty source");
+
+    assert_eq!(reload.watched_path_count(), 0);
+    assert_eq!(
+        reload
+            .start_watching(Duration::from_millis(10))
+            .expect_err("no source reports a path"),
+        WatchError::NoWatchableSources
+    );
+    assert_eq!(reload.config().value().unwrap().as_map().unwrap().len(), 0);
+    // A manual refresh loads every source and still succeeds.
+    assert_eq!(reload.refresh(), RefreshOutcome::Unchanged);
+    assert_eq!(reload.last_error(), None);
+}
+
+#[cfg(all(
+    feature = "dotenv",
+    feature = "json",
+    feature = "json5",
+    feature = "jsonc",
+    feature = "toml",
+    feature = "yaml",
+    feature = "ini"
+))]
+#[test]
+fn an_optional_absent_file_is_still_watched_by_default() {
+    use neotales_config::{
+        DotenvFile, IniFile, Json5File, JsonFile, JsoncFile, TomlFile, YamlFile,
+    };
+
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let reload = Builder::new()
+        .dotenv_file(
+            "dotenv",
+            DotenvFile::new(directory.path().join(".env")).optional(true),
+        )
+        .json_file(
+            "json",
+            JsonFile::new(directory.path().join("missing.json")).optional(true),
+        )
+        .json5_file(
+            "json5",
+            Json5File::new(directory.path().join("missing.json5")).optional(true),
+        )
+        .jsonc_file(
+            "jsonc",
+            JsoncFile::new(directory.path().join("missing.jsonc")).optional(true),
+        )
+        .toml_file(
+            "toml",
+            TomlFile::new(directory.path().join("missing.toml")).optional(true),
+        )
+        .yaml_file(
+            "yaml",
+            YamlFile::new(directory.path().join("missing.yaml")).optional(true),
+        )
+        .ini_file(
+            "ini",
+            IniFile::new(directory.path().join("missing.ini")).optional(true),
+        )
+        .build_reloadable()
+        .expect("every absent optional file is an empty source");
+
+    assert_eq!(
+        reload.watched_path_count(),
+        7,
+        "an absent optional file still reports its path unless watching is disabled"
+    );
+    assert_eq!(reload.refresh_if_changed(), RefreshOutcome::Unchanged);
+}
+
+#[cfg(all(
+    feature = "dotenv",
+    feature = "json",
+    feature = "json5",
+    feature = "jsonc",
+    feature = "toml",
+    feature = "yaml",
+    feature = "ini"
+))]
+#[allow(
+    clippy::similar_names,
+    reason = "one fixture path per format is clearer than an indexed array"
+)]
+#[test]
+fn every_optional_file_provider_appears_and_disappears_on_a_poll() {
+    use neotales_config::{
+        DotenvFile, IniFile, Json5File, JsonFile, JsoncFile, TomlFile, YamlFile,
+    };
+
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let dotenv = directory.path().join(".env");
+    let json = directory.path().join("missing.json");
+    let json5 = directory.path().join("missing.json5");
+    let jsonc = directory.path().join("missing.jsonc");
+    let toml = directory.path().join("missing.toml");
+    let yaml = directory.path().join("missing.yaml");
+    let ini = directory.path().join("missing.ini");
+
+    let reload = Builder::new()
+        .dotenv_file("dotenv", DotenvFile::new(&dotenv).optional(true))
+        .json_file("json", JsonFile::new(&json).optional(true))
+        .json5_file("json5", Json5File::new(&json5).optional(true))
+        .jsonc_file("jsonc", JsoncFile::new(&jsonc).optional(true))
+        .toml_file("toml", TomlFile::new(&toml).optional(true))
+        .yaml_file("yaml", YamlFile::new(&yaml).optional(true))
+        .ini_file("ini", IniFile::new(&ini).optional(true))
+        .build_reloadable()
+        .expect("every absent optional file is an empty source");
+    assert_eq!(reload.watched_path_count(), 7);
+    assert_eq!(reload.config().value().unwrap().as_map().unwrap().len(), 0);
+
+    // Every file appears at once; one poll reads all seven sources into one snapshot.
+    fs::write(&dotenv, "dotenv_value=on\n").unwrap();
+    fs::write(&json, r#"{"json_value": 1}"#).unwrap();
+    fs::write(&json5, "{ json5_value: 1 }").unwrap();
+    fs::write(&jsonc, r#"{"jsonc_value": 1}"#).unwrap();
+    fs::write(&toml, "toml_value = 1\n").unwrap();
+    fs::write(&yaml, "yaml_value: 1\n").unwrap();
+    fs::write(&ini, "ini_value = 1\n").unwrap();
+    assert_eq!(reload.refresh_if_changed(), RefreshOutcome::Reloaded);
+    let config = reload.config();
+    for key in [
+        "dotenv_value",
+        "json_value",
+        "json5_value",
+        "jsonc_value",
+        "toml_value",
+        "yaml_value",
+        "ini_value",
+    ] {
+        assert!(config.has(key).unwrap(), "{key} did not appear");
+    }
+
+    // Every file disappears at once; one poll drops every value they contributed.
+    for path in [&dotenv, &json, &json5, &jsonc, &toml, &yaml, &ini] {
+        fs::remove_file(path).unwrap();
+    }
+    assert_eq!(reload.refresh_if_changed(), RefreshOutcome::Reloaded);
+    assert_eq!(reload.config().value().unwrap().as_map().unwrap().len(), 0);
+}
+
 #[cfg(feature = "dotenv")]
 #[test]
 fn a_dotenv_file_reports_its_path_and_reloads() {

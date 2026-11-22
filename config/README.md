@@ -318,6 +318,32 @@ The JSON5 and JSONC constructors are the same shape: `Json5File::new(path)` and
 `JsoncFile::new(path)`. A provider reads its path again on every load, so building again or using
 the `reload` holder sees a replaced file.
 
+A file is **required** by default: an absent file fails the build with an unavailable-source error.
+`.optional(true)` changes only that case. It accepts an actual "not found" from opening the path as
+an empty source; a directory, a permission failure, a non-UTF-8 document, and a parse failure still
+reject the source. The open result itself decides, so there is no existence check for a file to
+appear or vanish between it and the read. An optional file that is absent may appear later.
+
+Every file provider, including `DotenvFile`, also reports its path to the polling watcher by
+default. `.reload_on_change(false)` keeps that path out of `Source::watch_paths`, so
+`refresh_if_changed` and `start_watching` ignore the file while `refresh()` still reloads it. The
+two flags are independent, and both defaults keep the behavior described below unchanged.
+
+```rust,no_run
+use neotales_config::{Builder, JsonFile};
+
+let config = Builder::new()
+    .json_file(
+        "local",
+        JsonFile::new("config/local.json")
+            .optional(true)
+            .reload_on_change(false),
+    )
+    .build()
+    .expect("an absent local overlay is allowed");
+assert!(!config.has("local.any.key").unwrap());
+```
+
 | Feature | Dialect | Root | Duplicate names | Number rule |
 | --- | --- | --- | --- | --- |
 | `json` | RFC 8259 JSON | object | later member wins | integer exact to `i128`, finite float |
@@ -380,8 +406,14 @@ if let Ok(config) = subscription.recv_timeout(Duration::from_secs(5)) {
 watcher.stop();
 ```
 
-Every file provider, including `DotenvFile`, reports its path through `Source::watch_paths`; a
-custom source can report its own stable files or return an empty list. Polling fingerprints each
+Every file provider, including `DotenvFile`, reports its path through `Source::watch_paths` by
+default; a custom source can report its own stable files or return an empty list, and
+`reload_on_change(false)` removes one file provider's path. An optional watched file that
+disappears is a change: the next successful refresh drops the values it contributed and an earlier
+source's value shows through. A required watched file that disappears fails the refresh and keeps
+the last good snapshot, like any other load failure. A parse failure is never a disappearance. A
+source with `reload_on_change(false)` contributes no path, so only `refresh()` sees it change.
+Polling fingerprints each
 watched file by streaming it in fixed-size chunks, so its memory use is bounded by a chunk rather
 than the file size. It still reads every byte, so a short interval over a large file costs real
 I/O; the fingerprint does not impose a parser's read limit. Detection latency is the interval plus

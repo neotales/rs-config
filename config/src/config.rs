@@ -168,6 +168,9 @@ impl Builder {
     /// order this method and [`Builder::delimiter`] are called in. The file is read at build, and
     /// `${NAME}` expansion reads earlier assignments and then the process environment. No call
     /// writes the process environment. See [`crate::DotenvFile`].
+    ///
+    /// The file is required and watched by default; see [`crate::DotenvFile::optional`] and
+    /// [`crate::DotenvFile::reload_on_change`].
     #[cfg(feature = "dotenv")]
     #[must_use]
     pub fn dotenv_file(self, name: impl Into<String>, file: crate::DotenvFile) -> Self {
@@ -178,6 +181,9 @@ impl Builder {
     ///
     /// The file is read at build and again whenever the source is loaded. It is read as RFC 8259
     /// JSON; comments and trailing commas are not accepted. See [`crate::JsonFile`].
+    ///
+    /// The file is required and watched by default; see [`crate::JsonFile::optional`] and
+    /// [`crate::JsonFile::reload_on_change`].
     #[cfg(feature = "json")]
     #[must_use]
     pub fn json_file(self, name: impl Into<String>, file: crate::JsonFile) -> Self {
@@ -189,6 +195,9 @@ impl Builder {
     /// The file is read at build and again whenever the source is loaded. JSON5 is a distinct
     /// dialect from JSONC: it accepts unquoted names, single-quoted strings, hexadecimal numbers,
     /// trailing commas, `Infinity`, and `NaN`. See [`crate::Json5File`].
+    ///
+    /// The file is required and watched by default; see [`crate::Json5File::optional`] and
+    /// [`crate::Json5File::reload_on_change`].
     #[cfg(feature = "json5")]
     #[must_use]
     pub fn json5_file(self, name: impl Into<String>, file: crate::Json5File) -> Self {
@@ -200,6 +209,9 @@ impl Builder {
     /// The file is read at build and again whenever the source is loaded. JSONC is standard JSON
     /// plus `//` and `/* */` comments; JSON5-only syntax and trailing commas are rejected. See
     /// [`crate::JsoncFile`].
+    ///
+    /// The file is required and watched by default; see [`crate::JsoncFile::optional`] and
+    /// [`crate::JsoncFile::reload_on_change`].
     #[cfg(feature = "jsonc")]
     #[must_use]
     pub fn jsonc_file(self, name: impl Into<String>, file: crate::JsoncFile) -> Self {
@@ -210,6 +222,9 @@ impl Builder {
     ///
     /// The file is read at build and again whenever the source is loaded. A TOML date or time is
     /// kept as [`crate::DateTime`]. See [`crate::TomlFile`].
+    ///
+    /// The file is required and watched by default; see [`crate::TomlFile::optional`] and
+    /// [`crate::TomlFile::reload_on_change`].
     #[cfg(feature = "toml")]
     #[must_use]
     pub fn toml_file(self, name: impl Into<String>, file: crate::TomlFile) -> Self {
@@ -221,6 +236,9 @@ impl Builder {
     /// The file is read at build and again whenever the source is loaded. Anchors, aliases, tags,
     /// duplicate keys, non-string keys, and multiple documents are rejected. See
     /// [`crate::YamlFile`].
+    ///
+    /// The file is required and watched by default; see [`crate::YamlFile::optional`] and
+    /// [`crate::YamlFile::reload_on_change`].
     #[cfg(feature = "yaml")]
     #[must_use]
     pub fn yaml_file(self, name: impl Into<String>, file: crate::YamlFile) -> Self {
@@ -231,6 +249,9 @@ impl Builder {
     ///
     /// The file is read at build and again whenever the source is loaded. Values stay strings and
     /// no interpolation is performed. See [`crate::IniFile`].
+    ///
+    /// The file is required and watched by default; see [`crate::IniFile::optional`] and
+    /// [`crate::IniFile::reload_on_change`].
     #[cfg(feature = "ini")]
     #[must_use]
     pub fn ini_file(self, name: impl Into<String>, file: crate::IniFile) -> Self {

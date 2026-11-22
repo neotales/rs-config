@@ -19,6 +19,7 @@ use crate::{SourceError, Value};
 
 use super::{
     Source,
+    file::read_bytes,
     keys::{Keys, insert},
 };
 
@@ -51,6 +52,13 @@ use super::{
 /// `{"http": {"port": "8080"}}`. A later assignment to the same path wins; a line that is not an
 /// assignment, an empty key, an empty path component, an empty separator, a non-UTF-8 file, and a
 /// scalar/map conflict each reject the source.
+///
+/// By default the file is required and its path is watched. [`Self::optional`] and
+/// [`Self::reload_on_change`] change those two defaults independently: an optional source treats
+/// only a genuine not-found as an empty document, and a source with change watching off keeps its
+/// path out of the polling watcher while a manual refresh still reads it. The key policy is still
+/// validated before the file is opened, so an invalid separator fails even when an optional file
+/// is absent.
 ///
 /// # Interpolation
 ///
@@ -91,9 +99,9 @@ use super::{
 ///
 /// # Errors
 ///
-/// Returns [`SourceError::unavailable`] when the file cannot be read and
-/// [`SourceError::invalid`] when it is not UTF-8, does not parse, or holds a reference the
-/// expander rejects. The key policy is checked before the file is opened, so an empty separator is
+/// Returns [`SourceError::unavailable`] when the file cannot be read (including when it is absent,
+/// unless [`Self::optional`] is enabled), and [`SourceError::invalid`] when it is not UTF-8, does
+/// not parse, or holds a reference the expander rejects. The key policy is checked before the file is opened, so an empty separator is
 /// invalid even when the file is missing or holds no assignment. The error carries the kind only;
 /// it never carries a path, a line, a variable name, or a value.
 ///
@@ -119,6 +127,8 @@ pub struct DotenvFile {
     keys: Keys,
     interpolate: bool,
     environment: Option<BTreeMap<String, String>>,
+    optional: bool,
+    reload_on_change: bool,
 }
 
 #[allow(
@@ -133,6 +143,8 @@ impl fmt::Debug for DotenvFile {
             .field("keys", &self.keys)
             .field("interpolate", &self.interpolate)
             .field("environment", &self.environment.as_ref().map(BTreeMap::len))
+            .field("optional", &self.optional)
+            .field("reload_on_change", &self.reload_on_change)
             .finish()
     }
 }
@@ -158,7 +170,44 @@ impl DotenvFile {
             keys: Keys::default(),
             interpolate: true,
             environment: None,
+            optional: false,
+            reload_on_change: true,
         }
+    }
+
+    /// Treats an absent file as an empty document instead of an error.
+    ///
+    /// The default is `false`, so an absent file fails the load with
+    /// [`SourceError::unavailable`] exactly as before. With `true`, only an actual
+    /// [`std::io::ErrorKind::NotFound`] from opening the path becomes an empty map. A path that is
+    /// a directory, a permission failure, a non-UTF-8 file, a parse failure, and a reference the
+    /// expander rejects all still reject the source. The open result itself decides: there is no
+    /// separate existence check for a file to appear or vanish between.
+    ///
+    /// The key policy is validated before the file is opened, so an empty separator still fails
+    /// when the file is absent. An optional file that is absent may appear later, and a watched
+    /// optional file that disappears is a change the next refresh observes: the values it
+    /// contributed are dropped and any value from an earlier source shows through again. A parse
+    /// failure is not an absence; it fails the refresh and keeps the previous snapshot published.
+    #[must_use]
+    pub const fn optional(mut self, optional: bool) -> Self {
+        self.optional = optional;
+        self
+    }
+
+    /// Reports the configured path to the polling watcher.
+    ///
+    /// The default is `true`. With `false`, [`Source::watch_paths`] returns an empty list for this
+    /// source, so `Reload::refresh_if_changed` and `Reload::start_watching` do not poll the file;
+    /// `Reload::refresh` still loads every source, including this one. If no source reports a path,
+    /// `Reload::start_watching` returns `WatchError::NoWatchableSources`.
+    ///
+    /// This setting is independent of [`Self::optional`]: it changes what is observed, not whether
+    /// an absent file is accepted.
+    #[must_use]
+    pub const fn reload_on_change(mut self, reload_on_change: bool) -> Self {
+        self.reload_on_change = reload_on_change;
+        self
     }
 
     /// Keeps only assignments whose key starts with `prefix`, and removes it from every selected
@@ -278,10 +327,12 @@ impl DotenvFile {
 
     fn build(&self) -> Result<Value, SourceError> {
         // Check the policy before the file is read: an empty separator is a caller error even when
-        // the file is empty or the prefix selects none of its assignments.
+        // the file is empty, absent and optional, or the prefix selects none of its assignments.
         self.keys.validate().map_err(|_| SourceError::invalid())?;
 
-        let bytes = std::fs::read(&self.path).map_err(|_| SourceError::unavailable())?;
+        let Some(bytes) = read_bytes(&self.path, self.optional)? else {
+            return Ok(Value::Map(BTreeMap::new()));
+        };
         let text = String::from_utf8(bytes).map_err(|_| SourceError::invalid())?;
         let document = neotales_dotenv::parse(&text);
         if document.first_invalid().is_some() {
@@ -670,6 +721,10 @@ impl Source for DotenvFile {
     }
 
     fn watch_paths(&self) -> Vec<PathBuf> {
-        vec![self.path.clone()]
+        if self.reload_on_change {
+            vec![self.path.clone()]
+        } else {
+            Vec::new()
+        }
     }
 }

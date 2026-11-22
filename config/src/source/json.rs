@@ -22,6 +22,11 @@ use super::{Source, file::read_text};
 /// in UTF-8: comments, trailing commas, single-quoted strings, unquoted keys, and a byte-order mark
 /// are not part of it and reject the source.
 ///
+/// By default the file is required and its path is watched. [`Self::optional`] and
+/// [`Self::reload_on_change`] change those two defaults independently: an optional source treats
+/// only a genuine not-found as an empty document, and a source with change watching off keeps its
+/// path out of the polling watcher while a manual refresh still reads it.
+///
 /// The document root must be an object. Object members keep their document order for duplicate
 /// detection, and a later member with the same name replaces the earlier one; the resulting map is
 /// sorted by name, as every [`Value::Map`] is. An array root, a scalar root, and an empty document
@@ -34,10 +39,11 @@ use super::{Source, file::read_text};
 ///
 /// # Errors
 ///
-/// Returns [`SourceError::unavailable`] when the file cannot be read,
-/// [`SourceError::invalid`] when it is not UTF-8, is not valid JSON, or does not have an object
-/// root, and [`SourceError::unrepresentable`] when a number does not fit the value model. The
-/// error carries the kind only; it never carries a path, a line, a member name, or a value.
+/// Returns [`SourceError::unavailable`] when the file cannot be read (including when it is
+/// absent, unless [`Self::optional`] is enabled), [`SourceError::invalid`] when it is not UTF-8,
+/// is not valid JSON, or does not have an object root, and [`SourceError::unrepresentable`] when a
+/// number does not fit the value model. The error carries the kind only; it never carries a path,
+/// a line, a member name, or a value.
 ///
 /// # Examples
 ///
@@ -58,25 +64,71 @@ use super::{Source, file::read_text};
 #[derive(Clone)]
 pub struct JsonFile {
     path: PathBuf,
+    optional: bool,
+    reload_on_change: bool,
 }
 
 #[allow(
     clippy::missing_fields_in_debug,
-    reason = "the path may identify a host and the contents may hold secrets; neither is reportable"
+    reason = "the path may identify a host and the contents may hold secrets; only the two \
+              behavior flags are reportable"
 )]
 impl fmt::Debug for JsonFile {
     fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
-        output.debug_struct("JsonFile").finish_non_exhaustive()
+        output
+            .debug_struct("JsonFile")
+            .field("optional", &self.optional)
+            .field("reload_on_change", &self.reload_on_change)
+            .finish_non_exhaustive()
     }
 }
 
 impl JsonFile {
     /// Registers `path` to be read when the source loads.
     ///
-    /// The path is opened once per load and is never written.
+    /// The path is opened once per load and is never written. The file is required and watched by
+    /// default; see [`Self::optional`] and [`Self::reload_on_change`].
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            optional: false,
+            reload_on_change: true,
+        }
+    }
+
+    /// Treats an absent file as an empty document instead of an error.
+    ///
+    /// The default is `false`, so an absent file fails the load with
+    /// [`SourceError::unavailable`] exactly as before. With `true`, only an actual
+    /// [`std::io::ErrorKind::NotFound`] from opening the path becomes an empty map. A path that is
+    /// a directory, a permission failure, a non-UTF-8 file, a parse failure, and a number the model
+    /// cannot hold all still reject the source. The open result itself decides: there is no
+    /// separate existence check for a file to appear or vanish between.
+    ///
+    /// An optional file that is absent may appear later, and a watched optional file that
+    /// disappears is a change the next refresh observes: the values it contributed are dropped and
+    /// any value from an earlier source shows through again. A parse failure is not an absence; it
+    /// fails the refresh and keeps the previous snapshot published.
+    #[must_use]
+    pub const fn optional(mut self, optional: bool) -> Self {
+        self.optional = optional;
+        self
+    }
+
+    /// Reports the configured path to the polling watcher.
+    ///
+    /// The default is `true`. With `false`, [`Source::watch_paths`] returns an empty list for this
+    /// source, so `Reload::refresh_if_changed` and `Reload::start_watching` do not poll the file;
+    /// `Reload::refresh` still loads every source, including this one. If no source reports a path,
+    /// `Reload::start_watching` returns `WatchError::NoWatchableSources`.
+    ///
+    /// This setting is independent of [`Self::optional`]: it changes what is observed, not whether
+    /// an absent file is accepted.
+    #[must_use]
+    pub const fn reload_on_change(mut self, reload_on_change: bool) -> Self {
+        self.reload_on_change = reload_on_change;
+        self
     }
 
     /// Returns the configured path.
@@ -90,7 +142,9 @@ impl JsonFile {
 
 impl Source for JsonFile {
     fn load(&self) -> Result<Value, SourceError> {
-        let text = read_text(&self.path)?;
+        let Some(text) = read_text(&self.path, self.optional)? else {
+            return Ok(Value::Map(BTreeMap::new()));
+        };
         let value = parse(&text)?;
         if value.as_map().is_none() {
             return Err(SourceError::invalid());
@@ -99,7 +153,11 @@ impl Source for JsonFile {
     }
 
     fn watch_paths(&self) -> Vec<PathBuf> {
-        vec![self.path.clone()]
+        if self.reload_on_change {
+            vec![self.path.clone()]
+        } else {
+            Vec::new()
+        }
     }
 }
 

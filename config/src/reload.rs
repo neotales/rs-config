@@ -53,7 +53,9 @@
 //!   Fingerprints use file contents rather than timestamps, so a replacement that preserves the
 //!   size or the modification time is still detected.
 //! - A source that reads no stable local file reports no path. Watching such a source has nothing
-//!   to observe; use [`Reload::refresh`] when the caller knows its input changed.
+//!   to observe; use [`Reload::refresh`] when the caller knows its input changed. A file source
+//!   with `reload_on_change(false)` reports no path for the same reason, even though
+//!   [`Reload::refresh`] still loads it.
 //!
 //! # Lifecycle and shutdown
 //!
@@ -259,8 +261,10 @@ impl Reload {
     /// Reloads every source and publishes the result when it differs.
     ///
     /// This does not consult the watched-file baseline; use [`Reload::refresh_if_changed`] for
-    /// that. Concurrent calls are serialized. A successful load that produces an identical value
-    /// tree and provenance returns [`RefreshOutcome::Unchanged`] and does not notify subscribers.
+    /// that. Every source is loaded, including a file source whose `reload_on_change` is `false`
+    /// and a source that reports no path at all. Concurrent calls are serialized. A successful
+    /// load that produces an identical value tree and provenance returns
+    /// [`RefreshOutcome::Unchanged`] and does not notify subscribers.
     ///
     /// # Errors
     ///
@@ -278,8 +282,9 @@ impl Reload {
     /// the contents observed by the previous successful refresh, poll or initial load, and
     /// otherwise behaves like [`Reload::refresh`]. With no watched files it always returns
     /// [`RefreshOutcome::Unchanged`], because nothing observable can change. Only the paths a
-    /// source reports are observed; a change in another input, such as a credential store, is
-    /// invisible here and needs [`Reload::refresh`].
+    /// source reports are observed; a file source with `reload_on_change(false)` reports none, and
+    /// a change in another input, such as a credential store, is invisible here. Both need
+    /// [`Reload::refresh`].
     ///
     /// A failed reload stays pending until a later refresh succeeds. While it is pending, this
     /// method retries the load even if no watched file changed, so a transient failure in another

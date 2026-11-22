@@ -11,6 +11,7 @@ mod dotenv_file;
 #[cfg(feature = "environment")]
 mod environment;
 #[cfg(any(
+    feature = "dotenv",
     feature = "json",
     feature = "json5",
     feature = "jsonc",
@@ -123,11 +124,14 @@ pub trait Source: Send + Sync {
 
     /// Returns the files whose contents decide what [`Source::load`] returns.
     ///
-    /// A file-based provider returns its configured path here, and the `reload` feature polls
-    /// those paths when the caller explicitly starts a watcher. The default is an empty list, so
-    /// a source over a process, a network service, or a vault names only the stable local files
-    /// it reads, if any. A path that does not exist yet is still returned: deletion and later
-    /// recreation are changes the caller wants to observe.
+    /// A file-based provider returns its configured path here unless change watching for that
+    /// source is turned off (for example with `JsonFile::reload_on_change(false)`); a provider in
+    /// another crate can offer the same switch. The `reload` feature polls those paths when the
+    /// caller explicitly starts a watcher. The default is an empty list, so a source over a
+    /// process, a network service, or a vault names only the stable local files it reads, if any.
+    /// A path that does not exist yet is still returned: deletion and later recreation are
+    /// changes the caller wants to observe. Watching is independent of whether a file is required
+    /// or optional.
     ///
     /// The paths are used for change detection only. They are never stored on an error, printed
     /// by a [`fmt::Debug`] implementation, or published in a snapshot, because a path can name a
