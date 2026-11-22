@@ -413,18 +413,20 @@ Every file provider, including `DotenvFile`, reports its path through `Source::w
 default; a custom source can report its own stable files or return an empty list, and
 `reload_on_change(false)` removes only that one file provider's contribution to the watched list.
 A change in any watched path reloads every source, not only the one that reported it, so a source
-with the flag off is still reloaded by a poll triggered elsewhere; a change to the file it reads
-alone is invisible to polling, whether or not other paths are watched, and needs `refresh()`. A
-path two sources share stays watched while either reports it, and `refresh()` always reloads
-everything. An optional watched file that disappears is a change: the next successful refresh
-drops the values it contributed and an earlier source's value shows through. A required watched
-file that disappears fails the refresh and keeps the last good snapshot, like any other load
-failure. A parse failure is never a disappearance. A watched path that exists but cannot be read
-(a directory at the path, a permission failure, a parent that is not a directory) is not an
-absence either: a poll attempts the load instead of reporting it unchanged. The sources decide the
-result: a source that needs the path fails and the last good snapshot stays published, but a custom
-source that reports the path without reading it can still load, and an unchanged merged snapshot
-is reported as unchanged without being published. Polling fingerprints each
+with the flag off is still reloaded by a poll triggered elsewhere. A change to the file it reads
+does not trigger a poll while no other source reports that same path; it is picked up only when a
+poll started by another watched path, or `refresh()`, loads every source. A path two sources share
+stays watched while either reports it, so a change to it triggers a poll by itself, and `refresh()`
+always reloads everything. An optional watched file that disappears is a change: the next
+successful refresh drops the values it contributed and an earlier source's value shows through. A
+required watched file that disappears fails the refresh and keeps the last good snapshot, like any
+other load failure. A parse failure is never a disappearance. A watched path that exists but
+cannot be read (a directory at the path, a permission failure, a parent that is not a directory)
+is not an absence either: a poll attempts the load instead of skipping it, because the fingerprint
+cannot show that the path is unchanged. The sources and snapshot equality then decide the result:
+a source that needs the path fails and the last good snapshot stays published; a custom source that
+reports the path without reading it can still load, and an unchanged merged snapshot is reported as
+unchanged without being published; a different snapshot is published. Polling fingerprints each
 watched file by streaming it in fixed-size chunks, so its memory use is bounded by a chunk rather
 than the file size. It still reads every byte, so a short interval over a large file costs real
 I/O; the fingerprint does not impose a parser's read limit. Detection latency is the interval plus
@@ -434,7 +436,8 @@ failure, including one from another source, is retried at the polling interval a
 snapshot stays published. The baseline is captured before the initial load, so a change during
 startup is not lost. Refreshes are serialized, and subscribers coalesce independently to the newest
 snapshot. Only the reported paths are observed: a source whose input also includes something else,
-such as a credential store, is invisible to polling, so call `refresh()` after that input changes.
+such as a credential store, does not trigger a poll when that input changes, so call `refresh()`
+after it changes; a poll another watched path starts also reloads every source and reads it.
 There is no async runtime, and no thread exists until `start_watching()` is called. A published
 snapshot holds plaintext, so do not log a `Config` that contains a secret. See the crate
 documentation for the full lifecycle, shutdown, error, and lifetime contract.
