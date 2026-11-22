@@ -17,7 +17,8 @@ use std::{
 };
 
 use neotales_config::{
-    Builder, RefreshOutcome, Reload, SourceError, SourceErrorKind, TomlFile, Value, WatchError,
+    Builder, RefreshOutcome, Reload, Source, SourceError, SourceErrorKind, TomlFile, Value,
+    WatchError,
 };
 
 fn fixture(text: &str) -> (tempfile::TempDir, PathBuf) {
@@ -32,6 +33,21 @@ fn reload(path: &std::path::Path) -> Reload {
         .toml_file("app", TomlFile::new(path).optional(true))
         .build_reloadable()
         .expect("the optional fixture builds")
+}
+
+/// Reports a watched path without reading it, so a load can succeed while that path is unreadable.
+struct WatchingConstant {
+    path: PathBuf,
+}
+
+impl Source for WatchingConstant {
+    fn load(&self) -> Result<Value, SourceError> {
+        Ok(Value::map([("constant", Value::from(1_i64))]))
+    }
+
+    fn watch_paths(&self) -> Vec<PathBuf> {
+        vec![self.path.clone()]
+    }
 }
 
 #[test]
@@ -205,6 +221,35 @@ fn an_unreadable_path_that_is_not_an_absence_forces_a_load_until_it_recovers() {
     assert!(outcome.is_reloaded(), "{outcome:?}");
     assert_eq!(reload.last_error(), None);
     assert_eq!(reload.config().get::<i64>("probe").unwrap(), 3);
+}
+
+#[test]
+fn an_unreadable_path_forces_a_load_that_a_custom_source_can_still_satisfy() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let path = directory.path().join("app.toml");
+    fs::create_dir(&path).expect("the directory fixture is creatable");
+
+    // The source reports the watched path without reading it: the fingerprint decides whether a
+    // load is attempted, not whether the sources can satisfy it.
+    let reload = Builder::new()
+        .source("constant", WatchingConstant { path: path.clone() })
+        .build_reloadable()
+        .expect("the fixture builds");
+    assert_eq!(reload.watched_path_count(), 1);
+
+    // The unreadable path forces a load, but the load succeeds and produces the published
+    // snapshot, so the outcome is Unchanged with no error. It is not a forced failure.
+    assert_eq!(reload.refresh_if_changed(), RefreshOutcome::Unchanged);
+    assert_eq!(reload.last_error(), None);
+
+    // Recovery forces another load but does not guarantee a publication: this source's value does
+    // not depend on the path, so the snapshot is still equal.
+    fs::remove_dir(&path).expect("the directory fixture is removable");
+    fs::write(&path, "probe = 3\n").expect("the replacement is writable");
+    assert_eq!(reload.refresh_if_changed(), RefreshOutcome::Unchanged);
+    assert_eq!(reload.generation(), 0);
+    let config = reload.config();
+    assert_eq!(config.get::<i64>("constant").unwrap(), 1);
 }
 
 #[test]

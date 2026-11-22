@@ -9,9 +9,9 @@
 //!   atomically. A value tree and its provenance are one `Arc<Snapshot>`, so a reader can never
 //!   observe a new value with an old origin or the reverse.
 //! - [`Reload::refresh_if_changed`] does the same, but only when a watched file's contents
-//!   changed since the last poll. It is the polling primitive a caller can drive from its own
-//!   event loop; [`Reload::start_watching`] is an explicit thread-based helper for callers that
-//!   have no loop.
+//!   changed since the last poll, an earlier reload failed, or a watched path cannot be
+//!   fingerprinted. It is the polling primitive a caller can drive from its own event loop;
+//!   [`Reload::start_watching`] is an explicit thread-based helper for callers that have no loop.
 //! - [`Reload::subscribe`] returns a [`Subscription`] for change notifications. Every subscriber
 //!   has its own generation, so one slow reader cannot consume or hide another reader's
 //!   notification. Notifications coalesce: a subscriber that falls behind is told about the
@@ -47,10 +47,12 @@
 //!   actual [`std::io::ErrorKind::NotFound`] counts as absent, which is the one case an optional
 //!   source accepts as missing. A path that exists but cannot be fingerprinted (a directory, a
 //!   permission failure, a path whose parent is not a directory, a read that fails part way) has
-//!   unknown contents: a poll attempts a load instead of comparing the fingerprint, so the
-//!   source's own failure is reported rather than the poll silently reporting
-//!   [`RefreshOutcome::Unchanged`]. That attempt is bounded by the polling interval, not a spin
-//!   loop, and the previous good snapshot stays published.
+//!   unknown contents: a poll attempts a load instead of comparing the fingerprint, so an
+//!   unreadable path never passes for an unchanged one. The attempt is bounded by the polling
+//!   interval, not a spin loop. Its result is decided by the sources and by snapshot equality, not
+//!   by the fingerprint: a source that needs the path can fail, which reports the failure and
+//!   keeps the previous good snapshot published, while a custom source that reports the path but
+//!   does not read it can still load, and an equal snapshot returns [`RefreshOutcome::Unchanged`].
 //! - A write in progress can be observed as a partial document. The refresh fails safely, the
 //!   previous good snapshot stays published, [`Reload::last_error`] reports the failure, and the
 //!   next poll retries even when the file's bytes did not change. Write a temporary file and
@@ -289,31 +291,38 @@ impl Reload {
     }
 
     /// Reloads only when a watched file's contents changed since the last successful refresh or
-    /// poll, or when an earlier reload failed.
+    /// poll, an earlier reload failed, or a watched path cannot be fingerprinted.
     ///
     /// This is the polling primitive: it fingerprints the watched files, compares the result with
-    /// the contents observed by the previous successful refresh, poll or initial load, and
-    /// otherwise behaves like [`Reload::refresh`]. A load it starts reads **every** source,
-    /// including one whose `reload_on_change` is `false`, because a change in any watched path can
-    /// affect the merged snapshot. The watched list is a union: two sources may report the same
-    /// path, and turning change watching off for one of them leaves the path watched when another
-    /// source reports it.
+    /// the contents observed by the previous successful refresh, poll or initial load, and starts a
+    /// load when they differ, when the previous reload failed, or when a fingerprint is unreadable.
+    /// Apart from that choice it behaves like [`Reload::refresh`]. A load it starts reads **every**
+    /// source, including one whose `reload_on_change` is `false`, because a change in any watched
+    /// path can affect the merged snapshot. The watched list is a union: two sources may report the
+    /// same path, and turning change watching off for one of them leaves the path watched when
+    /// another source reports it.
     ///
     /// With no watched files it always returns [`RefreshOutcome::Unchanged`], because nothing
     /// observable can change; that includes a failure left pending by an earlier manual refresh,
     /// which needs [`Reload::refresh`] to retry. A change in an input that is not a watched path,
     /// such as a credential store, is invisible here and needs [`Reload::refresh`]. A file source
-    /// with `reload_on_change(false)` contributes no path, but any poll that another watched path
-    /// starts still loads it, so only a configuration with no watched path at all needs the manual
-    /// call for it.
+    /// with `reload_on_change(false)` contributes no path: a load triggered by another watched path
+    /// still reads it, but a change to that file alone is not observed, whether or not other paths
+    /// are watched, and needs [`Reload::refresh`].
     ///
     /// A watched path that is absent is not the same observation as one that exists but cannot be
     /// fingerprinted. Only an actual [`std::io::ErrorKind::NotFound`] counts as absent; a directory
     /// at the path, a permission failure, a parent that is not a directory, and a read error are
     /// unknown contents. While a watched path is in that state this method attempts a load rather
-    /// than treating it as unchanged, so the source's failure is reported and the previous snapshot
-    /// stays published. When the path becomes readable again, the next call loads and publishes a
-    /// snapshot for the new contents.
+    /// than treating it as unchanged, so an unreadable path never passes for an unchanged one. The
+    /// attempt's outcome is decided by the sources, not by the fingerprint: a source that needs the
+    /// path may fail, which returns [`RefreshOutcome::Failed`] and keeps the previous snapshot
+    /// published, while a custom source that reports the path but does not read it can still load.
+    /// A successful load then follows the usual snapshot rule: an equal snapshot returns
+    /// [`RefreshOutcome::Unchanged`] and publishes nothing, and only a different one is published
+    /// as [`RefreshOutcome::Reloaded`]. Recovery is therefore a load attempt, not a publication:
+    /// once the path becomes readable the next call loads, but it publishes only when the resulting
+    /// snapshot differs from the published one.
     ///
     /// A failed reload stays pending until a later refresh succeeds. While it is pending, this
     /// method retries the load even if no watched file changed, so a transient failure in another

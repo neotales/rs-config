@@ -413,16 +413,18 @@ Every file provider, including `DotenvFile`, reports its path through `Source::w
 default; a custom source can report its own stable files or return an empty list, and
 `reload_on_change(false)` removes only that one file provider's contribution to the watched list.
 A change in any watched path reloads every source, not only the one that reported it, so a source
-with the flag off is still reloaded by a poll triggered elsewhere; a path two sources share stays
-watched while either reports it, and `refresh()` always reloads everything. An optional watched
-file that disappears is a change: the next successful refresh drops the values it contributed and
-an earlier source's value shows through. A required watched file that disappears fails the refresh
-and keeps the last good snapshot, like any other load failure. A parse failure is never a
-disappearance. A watched path that exists but cannot be read (a directory at the path, a
-permission failure, a parent that is not a directory) is not an absence either: a poll attempts the
-load, reports the failure, and keeps the last good snapshot, so an unreadable file never looks
-unchanged.
-Polling fingerprints each
+with the flag off is still reloaded by a poll triggered elsewhere; a change to the file it reads
+alone is invisible to polling, whether or not other paths are watched, and needs `refresh()`. A
+path two sources share stays watched while either reports it, and `refresh()` always reloads
+everything. An optional watched file that disappears is a change: the next successful refresh
+drops the values it contributed and an earlier source's value shows through. A required watched
+file that disappears fails the refresh and keeps the last good snapshot, like any other load
+failure. A parse failure is never a disappearance. A watched path that exists but cannot be read
+(a directory at the path, a permission failure, a parent that is not a directory) is not an
+absence either: a poll attempts the load instead of reporting it unchanged. The sources decide the
+result: a source that needs the path fails and the last good snapshot stays published, but a custom
+source that reports the path without reading it can still load, and an unchanged merged snapshot
+is reported as unchanged without being published. Polling fingerprints each
 watched file by streaming it in fixed-size chunks, so its memory use is bounded by a chunk rather
 than the file size. It still reads every byte, so a short interval over a large file costs real
 I/O; the fingerprint does not impose a parser's read limit. Detection latency is the interval plus

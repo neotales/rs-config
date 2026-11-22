@@ -184,10 +184,12 @@ defaults preserve the prior behavior.
 - `.reload_on_change(false)` removes only that source's contribution to the watched path list.
   A poll therefore cannot observe the file on that source's account, but a load started for any
   other reason loads every source, so a value from the file can still appear in the published
-  snapshot. `Reload::refresh` always loads every source. The watched list is the union of what the
-  sources report: two sources may name the same path, and it stays watched while either reports
-  it, so turning watching off for one of them does not remove the path. If no source reports a
-  path, `Reload::start_watching` returns `WatchError::NoWatchableSources`.
+  snapshot. A change to that file alone is invisible to polling, whether or not other paths are
+  watched, and needs `Reload::refresh`. `Reload::refresh` always loads every source. The watched
+  list is the union of what the sources report: two sources may name the same path, and it stays
+  watched while either reports it, so turning watching off for one of them does not remove the
+  path. If no source reports a path, `Reload::start_watching` returns
+  `WatchError::NoWatchableSources`.
 
 File-format keys are literal and hierarchical exactly as the document wrote them. The builder's
 delimiter is not applied as a key separator: a dotted key in a document is one key, not a nested
@@ -286,9 +288,12 @@ The `reload` feature is code only: it adds no dependency and starts no thread by
   file are three distinct observations, so deletion, unreadability, and recovery are each observed.
   Only an actual `io::ErrorKind::NotFound` is an absence. A path that exists but cannot be
   fingerprinted (a directory at the path, a permission failure, a parent that is not a directory,
-  a read error) has unknown contents, so a poll attempts a load instead of comparing it: the
-  source's failure is reported and the previous snapshot stays published, rather than the poll
-  reporting `Unchanged`. That attempt is bounded by the caller's polling interval, not a spin loop.
+  a read error) has unknown contents, so a poll attempts a load instead of comparing it, and an
+  unreadable path is never reported `Unchanged`. The attempt is bounded by the caller's polling
+  interval, not a spin loop. Its outcome is decided by the sources and by snapshot equality: a
+  source that needs the path can fail and leave the previous snapshot published, while a custom
+  source that reports the path without reading it can still load, in which case only a snapshot
+  that differs from the published one is published. Recovery is a load attempt, not a publication.
   A change that produces byte-identical contents is not a change, because the snapshot would be
   identical.
 - A poll that does load loads **every** source, not only the source that reported the changed
@@ -319,11 +324,12 @@ The `reload` feature is code only: it adds no dependency and starts no thread by
   cost follow total watched size. The fingerprint is independent of any provider's read limit;
   that limit applies when the source loads.
 - Change detection covers only the paths a source reports through `Source::watch_paths`. A file
-  provider with `reload_on_change(false)` contributes none for that source, and an input that is not
-  one of those files (for example a credential store) is invisible to polling; call
-  `Reload::refresh` after it changes. A poll that does load reads every source, including one whose
-  change watching is off, and the watched list is the union across sources, so a path reported by
-  another source stays watched.
+  provider with `reload_on_change(false)` contributes none for that source, so a change to its file
+  alone is invisible to polling, whether or not other paths are watched, and the caller must use
+  `Reload::refresh`; an input that is not one of those files (for example a credential store) is
+  the same. A poll that does load reads every source, including one whose change watching is off,
+  and the watched list is the union across sources, so a path reported by another source stays
+  watched.
 - A partially written file safely fails and is retried on the next poll even without a content
   change; an atomic rename is still the recommended write pattern.
 - A published snapshot holds merged values in plaintext. Only the newest snapshot is held by the
