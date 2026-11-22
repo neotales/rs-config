@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry as MapEntry},
     fmt,
     fs::File,
+    io,
     path::{Path, PathBuf},
 };
 
@@ -89,6 +90,13 @@ where
 /// - the read limits are the ones supplied at construction;
 /// - every mapped field becomes a [`Value::String`] at the configured path.
 ///
+/// By default the vault is required and its path is watched. [`Self::optional`] and
+/// [`Self::reload_on_change`] change those two defaults independently. An optional vault that is
+/// absent is an empty map, and the credential factory is not called because no file was opened. A
+/// path that is a directory, a permission failure, a corrupt or truncated document, wrong
+/// credentials, an exceeded limit, and a mapping that does not resolve all still reject the
+/// source. The open result itself decides absence: there is no separate existence check.
+///
 /// # Configuration validation
 ///
 /// Validation runs before the vault is opened and before the credential factory is called. The
@@ -104,11 +112,13 @@ where
 ///
 /// # Errors
 ///
-/// A file that cannot be opened is [`SourceError::unavailable`]. Wrong credentials, a malformed or
-/// truncated KDBX document, exceeded read limits, and a mapping that does not resolve are
-/// [`SourceError::invalid`]. A credential-factory error keeps the kind the factory chose. The
-/// provider never forwards the `neotales-keepass` error text, which is why the error cannot name a
-/// path, an entry, a field, or a value.
+/// A file that cannot be opened is [`SourceError::unavailable`], including an absent required
+/// vault. With [`Self::optional`], only an actual [`std::io::ErrorKind::NotFound`] from opening
+/// the path is an empty map instead. Wrong credentials, a malformed or truncated KDBX document,
+/// exceeded read limits, and a mapping that does not resolve are [`SourceError::invalid`]. A
+/// credential-factory error keeps the kind the factory chose. The provider never forwards the
+/// `neotales-keepass` error text, which is why the error cannot name a path, an entry, a field, or
+/// a value.
 ///
 /// # Secrets
 ///
@@ -146,12 +156,14 @@ pub struct KeePassFile {
     credentials: Box<dyn CredentialFactory>,
     mappings: Vec<Mapping>,
     delimiter: char,
+    optional: bool,
+    reload_on_change: bool,
 }
 
 #[allow(
     clippy::missing_fields_in_debug,
     reason = "the path, the credential factory, and the mappings are deliberately unreportable; \
-              only counts, the delimiter, and the non-secret limits are printed"
+              only counts, the delimiter, the flags, and the non-secret limits are printed"
 )]
 impl fmt::Debug for KeePassFile {
     fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -160,6 +172,8 @@ impl fmt::Debug for KeePassFile {
             .field("mappings", &self.mappings.len())
             .field("delimiter", &self.delimiter)
             .field("limits", &self.limits)
+            .field("optional", &self.optional)
+            .field("reload_on_change", &self.reload_on_change)
             .finish_non_exhaustive()
     }
 }
@@ -167,9 +181,10 @@ impl fmt::Debug for KeePassFile {
 impl KeePassFile {
     /// Registers one KDBX file with explicit read limits and a credential factory.
     ///
-    /// The file is not opened here. The path is used by [`Source::load`] and reported by
-    /// [`Source::watch_paths`], and it may be relative to the process's working directory. The
-    /// provider never creates, replaces, or writes the file.
+    /// The file is not opened here. The path is used by [`Source::load`] and, by default, reported
+    /// by [`Source::watch_paths`]; it may be relative to the process's working directory. The
+    /// vault is required and watched by default; see [`Self::optional`] and
+    /// [`Self::reload_on_change`]. The provider never creates, replaces, or writes the file.
     ///
     /// Use [`KdbxReadLimits`] to set the input, header, KDF, block, decompression, XML, and binary
     /// budgets. The value is used unchanged for every load; the provider adds no bound of its own.
@@ -187,7 +202,48 @@ impl KeePassFile {
             credentials: Box::new(credentials),
             mappings: Vec::new(),
             delimiter: '.',
+            optional: false,
+            reload_on_change: true,
         }
+    }
+
+    /// Treats an absent vault as an empty source instead of an error.
+    ///
+    /// The default is `false`, so an absent vault fails the load with
+    /// [`SourceError::unavailable`] exactly as before. With `true`, only an actual
+    /// [`std::io::ErrorKind::NotFound`] from opening the path becomes an empty map. The credential
+    /// factory is not called for an absent optional vault, because no file was opened: the
+    /// documented order is validation, a successful open, then one credential call. A path that is
+    /// a directory, a permission failure, a corrupt or truncated document, wrong credentials, an
+    /// exceeded limit, and a mapping that does not resolve all still reject the source. The open
+    /// result itself decides: there is no separate existence check for a vault to appear or vanish
+    /// between.
+    ///
+    /// An optional vault that is absent may appear later, and a watched optional vault that
+    /// disappears is a change the next refresh observes: the values it contributed are dropped and
+    /// any value from an earlier source shows through again. A corrupt replacement, wrong
+    /// credentials, and an exceeded limit are not an absence; each fails the refresh and keeps the
+    /// previous snapshot published.
+    #[must_use]
+    pub const fn optional(mut self, optional: bool) -> Self {
+        self.optional = optional;
+        self
+    }
+
+    /// Reports the KDBX path to the polling watcher.
+    ///
+    /// The default is `true`. With `false`, [`Source::watch_paths`] returns an empty list for this
+    /// source, so `Reload::refresh_if_changed` and `Reload::start_watching` do not poll the vault;
+    /// `Reload::refresh` still loads every source, including this one. If no source reports a path,
+    /// `Reload::start_watching` returns `WatchError::NoWatchableSources`.
+    ///
+    /// This setting is independent of [`Self::optional`]: it changes what is observed, not whether
+    /// an absent vault is accepted. A change in the credential source is never observable here;
+    /// call `Reload::refresh` after rotating a credential.
+    #[must_use]
+    pub const fn reload_on_change(mut self, reload_on_change: bool) -> Self {
+        self.reload_on_change = reload_on_change;
+        self
     }
 
     /// Selects the delimiter used to split [`Mapping::path`] values.
@@ -287,7 +343,13 @@ impl KeePassFile {
     fn load_tree(&self) -> Result<BTreeMap<String, Value>, SourceError> {
         let paths = self.validated_paths()?;
 
-        let file = File::open(&self.path).map_err(|_| SourceError::unavailable())?;
+        let file = match File::open(&self.path) {
+            Ok(file) => file,
+            Err(error) if self.optional && error.kind() == io::ErrorKind::NotFound => {
+                return Ok(BTreeMap::new());
+            }
+            Err(_) => return Err(SourceError::unavailable()),
+        };
         let mut credentials = self.credentials.credentials()?;
         let database = KdbxFile::load(file, &mut credentials, &self.limits)
             .map_err(|error| map_failure(error.kind))?;
@@ -313,7 +375,11 @@ impl Source for KeePassFile {
         // The path is reported even when the file is absent: creation, replacement, and deletion
         // are all changes the reload watcher should poll for. The credential source is not a path
         // and is not reported; a credential-only change needs a manual refresh.
-        vec![self.path.clone()]
+        if self.reload_on_change {
+            vec![self.path.clone()]
+        } else {
+            Vec::new()
+        }
     }
 }
 

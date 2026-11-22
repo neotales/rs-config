@@ -141,6 +141,25 @@ failure, and never put a value in the error.
 The provider never reads a password, never opens a key file, never looks for a `.kdbx` file, and
 never asks a terminal or a desktop for input.
 
+### Optional vault and change watching
+
+The vault is required and watched by default. The two flags are independent.
+
+- `.optional(true)` turns exactly one open result into an empty source: an actual
+  `io::ErrorKind::NotFound` from opening the KDBX path. The credential factory is not called for an
+  absent optional vault, because no file was opened. A path that is a directory, a permission
+  failure, a corrupt or truncated document, wrong credentials, an exceeded limit, and a mapping that
+  does not resolve all still fail the source.
+- `.reload_on_change(false)` removes the KDBX path from `Source::watch_paths`. A poll therefore
+  cannot observe a replacement or an appearance, while `Reload::refresh()` still loads the vault.
+  If no source reports a path, `Reload::start_watching` returns `WatchError::NoWatchableSources`.
+  A credential-only change is never observable through the watcher; call `Reload::refresh()` after
+  rotating a credential.
+
+An optional vault that is absent may appear later, and a watched optional vault that disappears is
+a change: the next successful refresh drops the values it contributed. A corrupt replacement or
+wrong credentials is not an absence; that refresh fails and keeps the previous good snapshot.
+
 ### Read limits
 
 `KeePassFile::new` requires `KdbxReadLimits`. The provider passes the value unchanged to every
@@ -151,9 +170,10 @@ an open stream, so the provider itself never holds a whole-vault buffer.
 
 ### Errors
 
-An unreadable file is `SourceError::Unavailable`. Wrong credentials, a malformed, truncated, or
-over-limit document, and a mapping that does not resolve are `SourceError::Invalid`. A credential
-factory error keeps the kind the factory chose.
+An unreadable file is `SourceError::Unavailable`, including an absent required vault. With
+`.optional(true)` only an actual not-found is an empty source instead. Wrong credentials, a
+malformed, truncated, or over-limit document, and a mapping that does not resolve are
+`SourceError::Invalid`. A credential factory error keeps the kind the factory chose.
 
 The provider never forwards the `neotales-keepass` error message. The message is not printed, not
 stored, and not attached as a source error. `neotales_config::Error` then names the registered

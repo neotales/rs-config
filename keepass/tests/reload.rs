@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-use neotales_config::{Builder, RefreshOutcome, SourceError, SourceErrorKind};
+use neotales_config::{Builder, RefreshOutcome, SourceError, SourceErrorKind, WatchError};
 use neotales_config_keepass::{KeePassFile, Mapping};
 use neotales_keepass::{KdbxCredentials, KdbxReadLimits};
 use support::{ENTRY_A, Fixture, MASTER_PASSWORD, TOKEN_A, TOKEN_B, TOKEN_CHANGED, TOKEN_RESTORED};
@@ -288,4 +288,81 @@ fn the_explicit_watcher_sees_a_replacement_and_survives_a_failed_one() {
     );
 
     watcher.stop();
+}
+
+#[test]
+fn an_absent_optional_vault_appears_and_disappears_in_a_poll() {
+    let fixture = Fixture::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    std::fs::remove_file(fixture.path()).expect("the fixture vault is removable");
+
+    let reload = Builder::new()
+        .source(
+            "vault",
+            support::provider(&fixture, Arc::clone(&calls)).optional(true),
+        )
+        .build_reloadable()
+        .expect("an absent optional vault builds");
+    assert_eq!(reload.watched_path_count(), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(!reload.config().has("app.token").expect("the path is valid"));
+    // The baseline and the observed state are both "missing", so nothing is reloaded yet.
+    assert_eq!(reload.refresh_if_changed(), RefreshOutcome::Unchanged);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    // Appearance is a watched change: the vault opens and the factory runs once.
+    fixture.write(TOKEN_A, TOKEN_B);
+    assert_eq!(reload.refresh_if_changed(), RefreshOutcome::Reloaded);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        reload.config().get::<String>("app.token").expect("mapped"),
+        TOKEN_A
+    );
+
+    // Disappearance is also a watched change. It drops the mapped values and does not call the
+    // factory, because no file is opened.
+    std::fs::remove_file(fixture.path()).expect("the fixture vault is removable");
+    assert_eq!(reload.refresh_if_changed(), RefreshOutcome::Reloaded);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(!reload.config().has("app.token").expect("the path is valid"));
+}
+
+#[test]
+fn change_watching_off_needs_a_manual_refresh() {
+    let fixture = Fixture::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let reload = Builder::new()
+        .source(
+            "vault",
+            support::provider(&fixture, Arc::clone(&calls)).reload_on_change(false),
+        )
+        .build_reloadable()
+        .expect("the initial load succeeds");
+    assert_eq!(reload.watched_path_count(), 0);
+    assert_eq!(
+        reload
+            .start_watching(Duration::from_millis(10))
+            .expect_err("no source reports a path"),
+        WatchError::NoWatchableSources
+    );
+
+    fixture.write(TOKEN_CHANGED, TOKEN_B);
+    assert_eq!(reload.refresh_if_changed(), RefreshOutcome::Unchanged);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "a poll with nothing to watch must not load or call the factory"
+    );
+    assert_eq!(
+        reload.config().get::<String>("app.token").expect("mapped"),
+        TOKEN_A
+    );
+
+    // The manual path always loads every source.
+    assert_eq!(reload.refresh(), RefreshOutcome::Reloaded);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        reload.config().get::<String>("app.token").expect("mapped"),
+        TOKEN_CHANGED
+    );
 }

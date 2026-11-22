@@ -257,17 +257,133 @@ fn wrong_credentials_are_rejected_without_reading_the_value() {
 #[test]
 fn an_unreadable_file_is_unavailable() {
     let fixture = Fixture::new();
-    let provider = KeePassFile::new(
-        fixture.directory().join("absent.kdbx"),
-        KdbxReadLimits::default(),
-        || KdbxCredentials::password(MASTER_PASSWORD).map_err(|_| SourceError::unavailable()),
-    )
-    .mapping(Mapping::new(ENTRY_A, "config.token", "app.token"));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = {
+        let calls = Arc::clone(&calls);
+        KeePassFile::new(
+            fixture.directory().join("absent.kdbx"),
+            KdbxReadLimits::default(),
+            move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                KdbxCredentials::password(MASTER_PASSWORD).map_err(|_| SourceError::unavailable())
+            },
+        )
+        .mapping(Mapping::new(ENTRY_A, "config.token", "app.token"))
+    };
 
     assert_eq!(
         provider.load().expect_err("the file is absent").kind(),
         SourceErrorKind::Unavailable
     );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "an absent required file must not ask for credentials"
+    );
+}
+
+#[test]
+fn an_optional_absent_vault_is_empty_and_does_not_ask_for_credentials() {
+    let fixture = Fixture::new();
+    let absent = fixture.directory().join("absent.kdbx");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = {
+        let calls = Arc::clone(&calls);
+        KeePassFile::new(absent.clone(), KdbxReadLimits::default(), move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            KdbxCredentials::password(MASTER_PASSWORD).map_err(|_| SourceError::unavailable())
+        })
+        .mapping(Mapping::new(ENTRY_A, "config.token", "app.token"))
+        .optional(true)
+    };
+
+    let value = provider.load().expect("an absent optional vault is empty");
+    assert!(
+        value.as_map().expect("the source root is a map").is_empty(),
+        "an absent optional vault contributes no key"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "the credential factory runs after a successful open, so an absence must not call it"
+    );
+    assert_eq!(
+        provider.watch_paths(),
+        vec![absent],
+        "optional does not change whether the path is watched"
+    );
+}
+
+#[test]
+fn an_optional_directory_is_still_unavailable() {
+    let fixture = Fixture::new();
+    let provider = KeePassFile::new(
+        fixture.directory().to_path_buf(),
+        KdbxReadLimits::default(),
+        || KdbxCredentials::password(MASTER_PASSWORD).map_err(|_| SourceError::unavailable()),
+    )
+    .mapping(Mapping::new(ENTRY_A, "config.token", "app.token"))
+    .optional(true);
+
+    assert_eq!(
+        provider
+            .load()
+            .expect_err("a directory is not absent")
+            .kind(),
+        SourceErrorKind::Unavailable
+    );
+}
+
+#[test]
+fn an_optional_corrupt_vault_is_still_rejected() {
+    let fixture = Fixture::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    fixture.corrupt();
+    let provider = {
+        let calls = Arc::clone(&calls);
+        KeePassFile::new(
+            fixture.path().to_path_buf(),
+            KdbxReadLimits::default(),
+            move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                KdbxCredentials::password(MASTER_PASSWORD).map_err(|_| SourceError::unavailable())
+            },
+        )
+        .mapping(Mapping::new(ENTRY_A, "config.token", "app.token"))
+        .optional(true)
+    };
+
+    assert_eq!(
+        provider
+            .load()
+            .expect_err("corrupt bytes are not absent")
+            .kind(),
+        SourceErrorKind::Invalid
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the file opened, so the factory ran before the codec rejected the document"
+    );
+}
+
+#[test]
+fn the_change_watch_flag_controls_the_reported_path() {
+    let fixture = Fixture::new();
+    let path = fixture.path().to_path_buf();
+
+    let default = support::provider(&fixture, Arc::new(AtomicUsize::new(0)));
+    assert_eq!(default.watch_paths(), vec![path.clone()]);
+
+    let disabled =
+        support::provider(&fixture, Arc::new(AtomicUsize::new(0))).reload_on_change(false);
+    assert!(
+        disabled.watch_paths().is_empty(),
+        "a disabled change watch reports no path"
+    );
+
+    let enabled = support::provider(&fixture, Arc::new(AtomicUsize::new(0))).reload_on_change(true);
+    assert_eq!(enabled.watch_paths(), vec![path]);
 }
 
 #[test]

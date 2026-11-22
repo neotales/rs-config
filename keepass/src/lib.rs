@@ -40,10 +40,17 @@
 //! - Paths are split on [`KeePassFile::delimiter`], `.` by default. The supported set is the core
 //!   builder's: `.`, `:`, `/`, `,`, and `|`. To read the mapped paths back with a string path, the
 //!   core builder must use the same delimiter.
+//! - [`KeePassFile::optional`] with `true` makes only an actual not-found from opening the KDBX
+//!   path an empty source. The credential factory is not called for an absent optional vault,
+//!   because no file was opened. A directory, a permission failure, a corrupt or truncated
+//!   document, wrong credentials, an exceeded limit, and a mapping that does not resolve still
+//!   reject the source. The default is `false`: the vault is required.
 //! - [`Source::watch_paths`](neotales_config::Source::watch_paths) reports the KDBX path even when
-//!   the file does not exist yet. With the core `reload` feature, the explicit polling watcher
-//!   therefore notices a replacement and a failed reload leaves the previous good snapshot in
-//!   place. This crate's own `reload` feature only forwards that core feature.
+//!   the file does not exist yet. [`KeePassFile::reload_on_change`] with `false` keeps the path out
+//!   of the polling watcher; a manual `neotales_config::Reload::refresh` still loads the vault. The
+//!   default is `true`. With the core `reload` feature, the explicit polling watcher therefore
+//!   notices a replacement and a failed reload leaves the previous good snapshot in place. This
+//!   crate's own `reload` feature only forwards that core feature.
 //!
 //! # Field presence
 //!
