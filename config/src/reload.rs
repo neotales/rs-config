@@ -281,10 +281,11 @@ impl Reload {
     /// This is the polling primitive: it fingerprints the watched files, compares the result with
     /// the contents observed by the previous successful refresh, poll or initial load, and
     /// otherwise behaves like [`Reload::refresh`]. With no watched files it always returns
-    /// [`RefreshOutcome::Unchanged`], because nothing observable can change. Only the paths a
-    /// source reports are observed; a file source with `reload_on_change(false)` reports none, and
-    /// a change in another input, such as a credential store, is invisible here. Both need
-    /// [`Reload::refresh`].
+    /// [`RefreshOutcome::Unchanged`], because nothing observable can change; that includes a
+    /// failure left pending by an earlier manual refresh, which needs [`Reload::refresh`] to
+    /// retry. Only the paths a source reports are observed; a file source with
+    /// `reload_on_change(false)` reports none, and a change in another input, such as a credential
+    /// store, is invisible here. Both need [`Reload::refresh`].
     ///
     /// A failed reload stays pending until a later refresh succeeds. While it is pending, this
     /// method retries the load even if no watched file changed, so a transient failure in another
@@ -392,9 +393,10 @@ impl Reload {
     /// The sanitized error from the most recent failed refresh, if any.
     ///
     /// A later successful refresh clears it. An [`RefreshOutcome::Unchanged`] from
-    /// [`Reload::refresh`] also clears it, because the sources loaded successfully; an unchanged
-    /// result from [`Reload::refresh_if_changed`] leaves it in place only when no failure is
-    /// pending, because nothing was loaded.
+    /// [`Reload::refresh`] also clears it, because the sources loaded successfully. An unchanged
+    /// result from [`Reload::refresh_if_changed`] leaves it in place, because nothing was loaded;
+    /// when no watched path exists, that call does not retry a pending failure, so use
+    /// [`Reload::refresh`] for it.
     #[must_use]
     pub fn last_error(&self) -> Option<Error> {
         lock(&self.inner.last_error).clone()

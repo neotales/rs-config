@@ -110,6 +110,21 @@ impl JsonFile {
     /// disappears is a change the next refresh observes: the values it contributed are dropped and
     /// any value from an earlier source shows through again. A parse failure is not an absence; it
     /// fails the refresh and keeps the previous snapshot published.
+    ///
+    /// ```no_run
+    /// use neotales_config::{Builder, JsonFile};
+    ///
+    /// let config = Builder::new()
+    ///     .json_file(
+    ///         "local",
+    ///         JsonFile::new("config/local.json")
+    ///             .optional(true)
+    ///             .reload_on_change(false),
+    ///     )
+    ///     .build()?;
+    /// assert!(!config.has("local.port")?);
+    /// # Ok::<(), neotales_config::Error>(())
+    /// ```
     #[must_use]
     pub const fn optional(mut self, optional: bool) -> Self {
         self.optional = optional;
