@@ -1,0 +1,8 @@
+# Optional overlay. Rename or delete this file to fall back to defaults.json,
+# including its port 18080 instead of this file's 18081.
+[server]
+port = 18081
+
+[demo]
+greeting = "hello from site.toml"
+mode = "toml"

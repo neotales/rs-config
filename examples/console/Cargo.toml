@@ -1,0 +1,28 @@
+[package]
+name = "neotales-config-example-console"
+description = "Runnable, non-publishable console sample for neotales-config"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.100"
+license = "MIT"
+repository = "https://github.com/neotales/rs-config"
+authors = ["x0craft"]
+readme = "README.md"
+# A sample is run from this repository, not installed from a registry.
+publish = false
+
+[dependencies]
+neotales-config = { path = "../../config", features = [
+    "args",
+    "dotenv",
+    "environment",
+    "json",
+    "toml",
+] }
+serde_json = "1.0"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

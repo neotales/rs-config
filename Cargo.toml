@@ -6,7 +6,7 @@
 # Every member is a virtual workspace member, so Cargo's default members are
 # all of them: a bare `cargo test` at the root reaches every crate.
 resolver = "3"
-members = ["config", "keepass"]
+members = ["config", "keepass", "examples/console", "examples/web"]
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

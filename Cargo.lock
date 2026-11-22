@@ -555,6 +555,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "neotales-config-example-console"
+version = "0.0.0"
+dependencies = [
+ "neotales-config",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "neotales-config-example-web"
+version = "0.0.0"
+dependencies = [
+ "neotales-config",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "neotales-config-keepass"
 version = "0.0.0-alpha.0"
 dependencies = [

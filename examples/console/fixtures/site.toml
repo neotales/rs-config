@@ -1,0 +1,7 @@
+# Optional overlay. Rename or delete this file to keep every defaults.json value.
+[server]
+port = 18081
+
+[demo]
+greeting = "hello from site.toml"
+mode = "toml"
